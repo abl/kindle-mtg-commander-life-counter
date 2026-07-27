@@ -451,6 +451,7 @@ class LauncherSignalTest(unittest.TestCase):
             child.chmod(0o755)
             environment = os.environ.copy()
             environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
 
             result = subprocess.run(
                 [str(launcher)], env=environment,
@@ -493,6 +494,7 @@ class LauncherSignalTest(unittest.TestCase):
             child.chmod(0o755)
             environment = os.environ.copy()
             environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
             environment["MTG_SHUTDOWN_GRACE_STEPS"] = "1"
             process = subprocess.Popen(
                 [str(launcher)],
@@ -548,6 +550,7 @@ class LauncherSignalTest(unittest.TestCase):
             child.chmod(0o755)
             environment = os.environ.copy()
             environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
             environment["MTG_SHUTDOWN_GRACE_STEPS"] = "1"
 
             result = subprocess.run(
@@ -597,6 +600,7 @@ class LauncherSignalTest(unittest.TestCase):
             fake_mkdir.chmod(0o755)
             environment = os.environ.copy()
             environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
             environment["MTG_SHUTDOWN_GRACE_STEPS"] = "1"
             environment["PATH"] = f"{tools}{os.pathsep}{environment['PATH']}"
             first = subprocess.Popen(
@@ -627,6 +631,221 @@ class LauncherSignalTest(unittest.TestCase):
                         process.send_signal(signal.SIGTERM)
                         process.wait(timeout=5)
 
+    def test_concurrent_guard_publication_cannot_leave_empty_guard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "mtg-life-counter"
+            tools = Path(temporary) / "tools"
+            (app / "bin").mkdir(parents=True)
+            tools.mkdir()
+            launcher = app / "bin" / "launch.sh"
+            shutil.copy2(
+                ROOT / "extensions" / "mtg-life-counter" / "bin" / "launch.sh",
+                launcher,
+            )
+            child = app / "bin" / "mtg-life-counter"
+            child.write_text("#!/bin/sh\nsleep 0.4\n")
+            child.chmod(0o755)
+            fake_mv = tools / "mv"
+            fake_mv.write_text(
+                "#!/bin/sh\n"
+                "case \"${2:-}\" in\n"
+                "  *'/data/app.lock.guard')\n"
+                "    base=${1##*/}\n"
+                "    : >\"$MTG_APP_DIR/mv-ready.$$\"\n"
+                "    while [ ! -e \"$MTG_APP_DIR/release-mv\" ]; do sleep 0.01; done\n"
+                "    /bin/mv \"$@\" || exit $?\n"
+                "    if [ -d \"$2/$base\" ]; then\n"
+                "      : >\"$MTG_APP_DIR/nested-guard\"\n"
+                "      sleep 0.5\n"
+                "    else\n"
+                "      while [ ! -e \"$MTG_APP_DIR/nested-guard\" ]; do sleep 0.01; done\n"
+                "    fi\n"
+                "    exit 0 ;;\n"
+                "esac\n"
+                "exec /bin/mv \"$@\"\n"
+            )
+            fake_mv.chmod(0o755)
+            environment = os.environ.copy()
+            environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
+            environment["PATH"] = f"{tools}:{environment['PATH']}"
+            first = subprocess.Popen(
+                [str(launcher)], env=environment,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            second = None
+            try:
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline and not list(app.glob("mv-ready.*")):
+                    if first.poll() is not None:
+                        break
+                    time.sleep(0.01)
+                old_publication = bool(list(app.glob("mv-ready.*")))
+                second = subprocess.Popen(
+                    [str(launcher)], env=environment,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                if old_publication:
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline and len(list(app.glob("mv-ready.*"))) < 2:
+                        time.sleep(0.01)
+                    self.assertGreaterEqual(len(list(app.glob("mv-ready.*"))), 2)
+                    (app / "release-mv").touch()
+                first.wait(timeout=5)
+                second.wait(timeout=5)
+                self.assertFalse((app / "data" / "app.lock.guard").exists())
+                final = subprocess.run(
+                    [str(launcher)], env=environment,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                self.assertEqual(final.returncode, 0)
+                self.assertFalse((app / "data" / "app.lock.guard").exists())
+            finally:
+                (app / "release-mv").touch(exist_ok=True)
+                for process in (first, second):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.wait()
+
+    def test_signal_before_guard_mkdir_never_deletes_foreign_guard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "mtg-life-counter"
+            tools = Path(temporary) / "tools"
+            (app / "bin").mkdir(parents=True)
+            tools.mkdir()
+            guard = app / "data" / "app.lock.guard"
+            guard.mkdir(parents=True)
+            (guard / "pid").write_text(f"{os.getpid()}\n")
+            launcher = app / "bin" / "launch.sh"
+            shutil.copy2(
+                ROOT / "extensions" / "mtg-life-counter" / "bin" / "launch.sh",
+                launcher,
+            )
+            child = app / "bin" / "mtg-life-counter"
+            child.write_text("#!/bin/sh\nexit 0\n")
+            child.chmod(0o755)
+            fake_mkdir = tools / "mkdir"
+            fake_mkdir.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'/data/app.lock.guard')\n"
+                "    : >\"$MTG_APP_DIR/guard-mkdir-paused\"\n"
+                "    sleep 0.5 ;;\n"
+                "esac\n"
+                "exec /bin/mkdir \"$@\"\n"
+            )
+            fake_mkdir.chmod(0o755)
+            environment = os.environ.copy()
+            environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
+            environment["PATH"] = f"{tools}:{environment['PATH']}"
+            process = subprocess.Popen(
+                [str(launcher)], env=environment,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                paused = app / "guard-mkdir-paused"
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and not paused.exists():
+                    time.sleep(0.01)
+                self.assertTrue(paused.exists())
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=3), 143)
+                self.assertTrue(guard.is_dir())
+                self.assertEqual((guard / "pid").read_text(), f"{os.getpid()}\n")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+    def test_signal_after_guard_removal_never_deletes_replacement_guard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "mtg-life-counter"
+            tools = Path(temporary) / "tools"
+            (app / "bin").mkdir(parents=True)
+            tools.mkdir()
+            guard = app / "data" / "app.lock.guard"
+            launcher = app / "bin" / "launch.sh"
+            shutil.copy2(
+                ROOT / "extensions" / "mtg-life-counter" / "bin" / "launch.sh",
+                launcher,
+            )
+            child = app / "bin" / "mtg-life-counter"
+            child.write_text("#!/bin/sh\nsleep 1\n")
+            child.chmod(0o755)
+            fake_rmdir = tools / "rmdir"
+            fake_rmdir.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'/data/app.lock.guard')\n"
+                "    /bin/rmdir \"$@\" || exit $?\n"
+                "    : >\"$MTG_APP_DIR/guard-removed-paused\"\n"
+                "    sleep 0.5\n"
+                "    exit 0 ;;\n"
+                "esac\n"
+                "exec /bin/rmdir \"$@\"\n"
+            )
+            fake_rmdir.chmod(0o755)
+            environment = os.environ.copy()
+            environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
+            environment["PATH"] = f"{tools}:{environment['PATH']}"
+            process = subprocess.Popen(
+                [str(launcher)], env=environment,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                paused = app / "guard-removed-paused"
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and not paused.exists():
+                    time.sleep(0.01)
+                self.assertTrue(paused.exists())
+                guard.mkdir()
+                (guard / "pid").write_text(f"{os.getpid()}\n")
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=3), 143)
+                self.assertTrue(guard.is_dir())
+                self.assertEqual((guard / "pid").read_text(), f"{os.getpid()}\n")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+    def test_signal_from_new_child_cannot_orphan_before_pid_capture(self):
+        for attempt in range(30):
+            with self.subTest(attempt=attempt):
+                with tempfile.TemporaryDirectory() as temporary:
+                    app = Path(temporary) / "mtg-life-counter"
+                    (app / "bin").mkdir(parents=True)
+                    launcher = app / "bin" / "launch.sh"
+                    shutil.copy2(
+                        ROOT / "extensions" / "mtg-life-counter" / "bin" / "launch.sh",
+                        launcher,
+                    )
+                    child = app / "bin" / "mtg-life-counter"
+                    child.write_text(
+                        "#!/bin/sh\n"
+                        "trap '' TERM\n"
+                        "kill -TERM \"$PPID\"\n"
+                        "sleep 0.15\n"
+                        ": >\"$MTG_APP_DIR/leaked-child\"\n"
+                    )
+                    child.chmod(0o755)
+                    environment = os.environ.copy()
+                    environment["MTG_APP_DIR"] = str(app)
+                    environment["MTG_IDLE_INHIBIT"] = "0"
+                    environment["MTG_SHUTDOWN_GRACE_STEPS"] = "0"
+                    result = subprocess.run(
+                        [str(launcher)], env=environment,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=3,
+                    )
+                    time.sleep(0.2)
+                    self.assertEqual(result.returncode, 143)
+                    self.assertFalse((app / "leaked-child").exists())
+                    self.assertFalse((app / "data" / "app.lock").exists())
+
     def test_invalid_zero_lock_pid_is_recovered_without_process_selector(self):
         with tempfile.TemporaryDirectory() as temporary:
             app = Path(temporary) / "mtg-life-counter"
@@ -644,6 +863,7 @@ class LauncherSignalTest(unittest.TestCase):
             child.chmod(0o755)
             environment = os.environ.copy()
             environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
 
             result = subprocess.run(
                 [str(launcher)], env=environment,
@@ -653,6 +873,139 @@ class LauncherSignalTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0)
             self.assertFalse(lock.exists())
+
+    def test_term_during_startup_after_lock_publication_cleans_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "mtg-life-counter"
+            tools = Path(temporary) / "tools"
+            (app / "bin").mkdir(parents=True)
+            tools.mkdir()
+            launcher = app / "bin" / "launch.sh"
+            shutil.copy2(
+                ROOT / "extensions" / "mtg-life-counter" / "bin" / "launch.sh",
+                launcher,
+            )
+            child = app / "bin" / "mtg-life-counter"
+            child.write_text("#!/bin/sh\nexit 0\n")
+            child.chmod(0o755)
+            fake_chmod = tools / "chmod"
+            fake_chmod.write_text(
+                "#!/bin/sh\n"
+                ": >\"$MTG_APP_DIR/startup-paused\"\n"
+                "sleep 0.5\n"
+                "exit 0\n"
+            )
+            fake_chmod.chmod(0o755)
+            environment = os.environ.copy()
+            environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
+            environment["PATH"] = f"{tools}:{environment['PATH']}"
+
+            process = subprocess.Popen(
+                [str(launcher)], env=environment,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                paused = app / "startup-paused"
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and not paused.exists():
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(paused.exists())
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=3), 143)
+                self.assertFalse((app / "data" / "app.lock").exists())
+                self.assertFalse((app / "data" / "app.lock.guard").exists())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+    def test_term_during_partial_lock_publication_cleans_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "mtg-life-counter"
+            tools = Path(temporary) / "tools"
+            (app / "bin").mkdir(parents=True)
+            tools.mkdir()
+            launcher = app / "bin" / "launch.sh"
+            shutil.copy2(
+                ROOT / "extensions" / "mtg-life-counter" / "bin" / "launch.sh",
+                launcher,
+            )
+            child = app / "bin" / "mtg-life-counter"
+            child.write_text("#!/bin/sh\nexit 0\n")
+            child.chmod(0o755)
+            fake_mkdir = tools / "mkdir"
+            fake_mkdir.write_text(
+                "#!/bin/sh\n"
+                "/bin/mkdir \"$@\" || exit $?\n"
+                "case \"$*\" in\n"
+                "  *'/data/app.lock')\n"
+                "    : >\"$MTG_APP_DIR/partial-lock-paused\"\n"
+                "    sleep 0.5 ;;\n"
+                "esac\n"
+            )
+            fake_mkdir.chmod(0o755)
+            environment = os.environ.copy()
+            environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "0"
+            environment["PATH"] = f"{tools}:{environment['PATH']}"
+
+            process = subprocess.Popen(
+                [str(launcher)], env=environment,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                paused = app / "partial-lock-paused"
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and not paused.exists():
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(paused.exists())
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=3), 143)
+                self.assertFalse((app / "data" / "app.lock").exists())
+                self.assertFalse((app / "data" / "app.lock.guard").exists())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+    def test_launcher_never_invokes_power_policy_helpers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "mtg-life-counter"
+            (app / "bin").mkdir(parents=True)
+            launcher = app / "bin" / "launch.sh"
+            shutil.copy2(
+                ROOT / "extensions" / "mtg-life-counter" / "bin" / "launch.sh",
+                launcher,
+            )
+            child = app / "bin" / "mtg-life-counter"
+            child.write_text(
+                "#!/bin/sh\n"
+                "case \"${1:-}\" in\n"
+                "  --idle-*) : >\"$MTG_APP_DIR/power-helper-called\"; exit 99 ;;\n"
+                "esac\n"
+                ": >\"$MTG_APP_DIR/gameplay-started\"\n"
+            )
+            child.chmod(0o755)
+            environment = os.environ.copy()
+            environment["MTG_APP_DIR"] = str(app)
+            environment["MTG_IDLE_INHIBIT"] = "1"
+            environment["MTG_IDLE_KEEP_AWAKE"] = "malformed"
+            environment["MTG_IDLE_KEEP_AWAKE_INTERVAL"] = "9" * 1000
+
+            result = subprocess.run(
+                [str(launcher)], env=environment,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue((app / "gameplay-started").exists())
+            self.assertFalse((app / "power-helper-called").exists())
+            self.assertFalse((app / "data" / "app.lock").exists())
 
 
 class NativeShutdownSourceTest(unittest.TestCase):

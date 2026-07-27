@@ -15,12 +15,29 @@ void game_reset(GameState *game) {
     for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
         game->life[player] = GAME_STARTING_LIFE;
         game->poison[player] = 0;
+        game->eliminated[player] = false;
         for (int source = 0; source < GAME_PLAYER_COUNT; ++source) {
             game->commander_damage[player][source] = 0;
         }
     }
     game->first_player = GAME_NO_PLAYER;
     game->monarch_player = GAME_NO_PLAYER;
+}
+
+static bool player_meets_loss_threshold(const GameState *game, int player) {
+    if (!game || !valid_player(player)) return false;
+    if (game->life[player] <= 0 || game->poison[player] >= 10) return true;
+    for (int source = 0; source < GAME_PLAYER_COUNT; ++source) {
+        if (game->commander_damage[player][source] >= 21) return true;
+    }
+    return false;
+}
+
+bool game_evaluate_elimination_after_mutation(GameState *game, int player) {
+    if (!player_meets_loss_threshold(game, player) ||
+        game->eliminated[player]) return false;
+    game->eliminated[player] = true;
+    return true;
 }
 
 void game_adjust(GameState *game, int player, int delta) {
@@ -76,6 +93,12 @@ bool game_apply_hold_from_snapshot(GameState *game, const GameState *before,
                                    GameControl control) {
     if (!game || !before || !valid_player(control.player)) return false;
 
+    if (control.type == GAME_CONTROL_PLAYER_STATE) {
+        bool target = !before->eliminated[control.player];
+        if (game->eliminated[control.player] == target) return false;
+        game->eliminated[control.player] = target;
+        return true;
+    }
     if (control.type == GAME_CONTROL_LIFE) {
         if (control.delta != -1 && control.delta != 1) return false;
         long long target = (long long)before->life[control.player] +
@@ -111,6 +134,32 @@ bool game_apply_hold_from_snapshot(GameState *game, const GameState *before,
     return false;
 }
 
+bool game_control_changed_from_snapshot(const GameState *game,
+                                        const GameState *before,
+                                        GameControl control) {
+    if (!game || !before || !valid_player(control.player)) return false;
+    if (control.type == GAME_CONTROL_LIFE) {
+        return game->life[control.player] != before->life[control.player];
+    }
+    if (control.type == GAME_CONTROL_COMMANDER) {
+        return valid_player(control.source) &&
+               (game->life[control.player] != before->life[control.player] ||
+                game->commander_damage[control.player][control.source] !=
+                    before->commander_damage[control.player][control.source]);
+    }
+    if (control.type == GAME_CONTROL_POISON) {
+        return game->poison[control.player] != before->poison[control.player];
+    }
+    if (control.type == GAME_CONTROL_MONARCH) {
+        return game->monarch_player != before->monarch_player;
+    }
+    if (control.type == GAME_CONTROL_PLAYER_STATE) {
+        return game->eliminated[control.player] !=
+               before->eliminated[control.player];
+    }
+    return false;
+}
+
 bool game_control_equal(GameControl left, GameControl right) {
     return left.type == right.type && left.player == right.player &&
            left.source == right.source && left.delta == right.delta;
@@ -118,6 +167,78 @@ bool game_control_equal(GameControl left, GameControl right) {
 
 void game_set_first(GameState *game, int player) {
     if (valid_player(player) || player == GAME_NO_PLAYER) game->first_player = player;
+}
+
+void game_life_preview_reset(GameLifePreview *preview) {
+    if (!preview) return;
+    memset(preview, 0, sizeof(*preview));
+}
+
+bool game_life_preview_clear_player(GameLifePreview *preview, int player) {
+    if (!preview || !valid_player(player)) return false;
+    bool changed = preview->visible[player] || preview->net[player] != 0 ||
+                   preview->expires_at_ms[player] != 0;
+    preview->visible[player] = false;
+    preview->net[player] = 0;
+    preview->expires_at_ms[player] = 0;
+    return changed;
+}
+
+bool game_life_preview_record(GameLifePreview *preview, int player,
+                              int life_before, int life_after,
+                              int64_t now_ms) {
+    if (!preview || !valid_player(player)) return false;
+    if (preview->visible[player] &&
+        now_ms >= preview->expires_at_ms[player]) {
+        (void)game_life_preview_clear_player(preview, player);
+    }
+    int64_t delta = (int64_t)life_after - (int64_t)life_before;
+    if (delta == 0) return false;
+    if (delta > 0 && preview->net[player] > INT64_MAX - delta) {
+        preview->net[player] = INT64_MAX;
+    } else if (delta < 0 && preview->net[player] < INT64_MIN - delta) {
+        preview->net[player] = INT64_MIN;
+    } else {
+        preview->net[player] += delta;
+    }
+    if (preview->net[player] == 0) {
+        game_life_preview_clear_player(preview, player);
+        return true;
+    }
+    preview->visible[player] = true;
+    preview->expires_at_ms[player] =
+        now_ms > INT64_MAX - GAME_LIFE_PREVIEW_DURATION_MS
+            ? INT64_MAX
+            : now_ms + GAME_LIFE_PREVIEW_DURATION_MS;
+    return true;
+}
+
+bool game_life_preview_expire(GameLifePreview *preview, int64_t now_ms) {
+    if (!preview) return false;
+    bool changed = false;
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        if (preview->visible[player] &&
+            now_ms >= preview->expires_at_ms[player]) {
+            changed = game_life_preview_clear_player(preview, player) || changed;
+        }
+    }
+    return changed;
+}
+
+bool game_life_preview_format(const GameLifePreview *preview, int player,
+                              char *text, size_t text_size) {
+    if (!preview || !valid_player(player) || !text || text_size < 4 ||
+        !preview->visible[player] || preview->net[player] == 0) return false;
+    char sign = preview->net[player] < 0 ? '-' : '+';
+    int magnitude;
+    if (preview->net[player] > 99 || preview->net[player] < -99) {
+        magnitude = 99;
+    } else {
+        magnitude = preview->net[player] < 0
+            ? (int)-preview->net[player]
+            : (int)preview->net[player];
+    }
+    return snprintf(text, text_size, "%c%02d", sign, magnitude) == 3;
 }
 
 static bool parse_line(char *line, char *key, size_t key_size, int *value) {
@@ -147,7 +268,9 @@ bool game_load(GameState *game, const char *path) {
     bool life_seen[GAME_PLAYER_COUNT] = {false};
     bool commander_seen[GAME_PLAYER_COUNT][GAME_PLAYER_COUNT] = {{false}};
     bool poison_seen[GAME_PLAYER_COUNT] = {false};
+    bool eliminated_seen[GAME_PLAYER_COUNT] = {false};
     bool version_seen = false;
+    int version = 0;
     bool first_seen = false;
     bool monarch_seen = false;
     bool valid = true;
@@ -157,8 +280,10 @@ bool game_load(GameState *game, const char *path) {
         int value;
         if (!parse_line(line, key, sizeof(key), &value)) {
             valid = false;
-        } else if (strcmp(key, "VERSION") == 0 && !version_seen && value == 2) {
+        } else if (strcmp(key, "VERSION") == 0 && !version_seen &&
+                   (value == 2 || value == 3)) {
             version_seen = true;
+            version = value;
         } else if (key[0] == 'P' && key[1] >= '1' && key[1] <= '4' &&
                    key[2] == '\0') {
             int index = key[1] - '1';
@@ -188,6 +313,15 @@ bool game_load(GameState *game, const char *path) {
                 loaded.poison[player] = value;
                 poison_seen[player] = true;
             }
+        } else if (strncmp(key, "ELIM", 4) == 0 &&
+                   key[4] >= '1' && key[4] <= '4' && key[5] == '\0') {
+            int player = key[4] - '1';
+            if ((value != 0 && value != 1) || eliminated_seen[player]) {
+                valid = false;
+            } else {
+                loaded.eliminated[player] = value == 1;
+                eliminated_seen[player] = true;
+            }
         } else if (strcmp(key, "FIRST") == 0 && !first_seen &&
                    value >= 0 && value <= GAME_PLAYER_COUNT) {
             loaded.first_player = value - 1;
@@ -210,13 +344,15 @@ bool game_load(GameState *game, const char *path) {
         if (!first_seen || !monarch_seen) valid = false;
         for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
             if (!poison_seen[player]) valid = false;
+            if (version == 3 && !eliminated_seen[player]) valid = false;
+            if (version == 2 && eliminated_seen[player]) valid = false;
             for (int source = 0; source < GAME_PLAYER_COUNT; ++source) {
                 if (!commander_seen[player][source]) valid = false;
             }
         }
     } else {
         for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
-            if (poison_seen[player]) valid = false;
+            if (poison_seen[player] || eliminated_seen[player]) valid = false;
             for (int source = 0; source < GAME_PLAYER_COUNT; ++source) {
                 if (commander_seen[player][source]) valid = false;
             }
@@ -239,7 +375,7 @@ bool game_save(const GameState *game, const char *path) {
         return false;
     }
 
-    bool ok = fprintf(file, "VERSION=2\nP1=%d\nP2=%d\nP3=%d\nP4=%d\n",
+    bool ok = fprintf(file, "VERSION=3\nP1=%d\nP2=%d\nP3=%d\nP4=%d\n",
                       game->life[0], game->life[1], game->life[2],
                       game->life[3]) > 0;
     for (int recipient = 0; ok && recipient < GAME_PLAYER_COUNT; ++recipient) {
@@ -251,6 +387,10 @@ bool game_save(const GameState *game, const char *path) {
     for (int player = 0; ok && player < GAME_PLAYER_COUNT; ++player) {
         ok = fprintf(file, "POISON%d=%d\n", player + 1,
                      game->poison[player]) > 0;
+    }
+    for (int player = 0; ok && player < GAME_PLAYER_COUNT; ++player) {
+        ok = fprintf(file, "ELIM%d=%d\n", player + 1,
+                     game->eliminated[player] ? 1 : 0) > 0;
     }
     if (ok) {
         ok = fprintf(file, "FIRST=%d\nMONARCH=%d\n",

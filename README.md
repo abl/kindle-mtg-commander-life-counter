@@ -5,14 +5,16 @@ A local, offline four-player Commander life counter for jailbroken Kindle e-read
 ## On-device screenshot
 
 <p align="center">
-  <img src="assets/screenshots/kindle-v2-on-device.jpg" alt="MTG Commander Life Counter V2 four-player board running on an Amazon Kindle Paperwhite" width="640">
+  <img src="assets/screenshots/kindle-v2.1-on-device.jpg" alt="MTG Commander Life Counter V2.1 on a Kindle Paperwhite showing GAME OVER and a signed life preview" width="640">
 </p>
 
-This is V2 running on Amazon Kindle Paperwhite hardware.
+This is V2.1 running on Amazon Kindle Paperwhite hardware.
 
 ## Current development status
 
 The screenshot above is the accepted V2 device build running on Kindle hardware.
+The V2.1 production candidate completed host verification, transactional MTP readback,
+and focused Paperwhite acceptance on 2026-07-27.
 
 - Four players start at 40 life.
 - Tap the seat-facing half of each player panel for −1/+1.
@@ -25,11 +27,18 @@ The screenshot above is the accepted V2 device build running on Kindle hardware.
 - Tap a crown to assign/transfer Monarch; hold the active crown to clear it.
 - `Pick First` chooses a random player different from the current selection.
 - `New Game` confirms before resetting all V2 gameplay state.
+- Hold an active player's name to show a reversible, panel-wide `GAME OVER` state.
+  Life at zero, poison at ten, or 21 damage from one commander source also
+  activates it after the completed tap or hold action. Hold the black panel to restore.
+- Every real life change produces an independent signed three-second preview for
+  that player, including commander damage and refunds.
 - `Menu` provides live battery status, a front-light on/off toggle that restores
   the prior brightness, Back to Game, and immediate saving Exit.
 - Pressing the Kindle sleep button turns off the front light and blocks game
   touches. Waking restores touch and restores the exact prior brightness only
   when the light was on before sleep. Exit always leaves the front light off.
+- V2.1 resets only the Kindle inactivity timer while the app is active. The physical
+  sleep button still sleeps and wakes normally, and ordinary auto-sleep returns after Exit.
 - Relaunch restores the previous game.
 - No cloud service, account, internet, or paid dependency.
 
@@ -77,7 +86,19 @@ native/tests/run.sh
 python3 tests/test_menu_json.py
 ```
 
-These tests verify V2 state transitions, all 16 commander hit targets, rotated life controls, hold promotion, persistence migration, the battery/front-light adapter, and the one-row KUAL launcher. Physical Kindle acceptance has also confirmed e-ink appearance, GTK window ownership, touch behavior, live battery status, exact front-light restoration, and fail-closed sleep/wake handling.
+These tests verify V2.1 elimination thresholds/restoration, signed preview arithmetic,
+all 16 commander hit targets, rotated controls, hold promotion, V1/V2/V3 persistence
+migration, the battery/front-light adapter, active-state inactivity pulses, power-policy
+safety boundaries, and the one-row KUAL launcher. The exact V2.1 candidate passed focused
+production-package acceptance on a Kindle Paperwhite on 2026-07-27.
+
+V2.1 never enables `preventScreenSaver`, which target-Paperwhite testing proved blocks
+the physical sleep button. Instead, a bounded adapter checks for exact `active` power state
+and sends `touchScreenSaverTimeout=1` once per minute. A private target-device probe kept
+the app awake untouched for 12 minutes, remained asleep for a 90-second physical-button
+test, woke with working touch, and restored ordinary auto-sleep after Exit. The exact
+integrated release repeated and passed those four checks. See
+[`docs/v2.1-device-acceptance.md`](docs/v2.1-device-acceptance.md) for sanitized evidence.
 
 ## Build target
 
@@ -96,11 +117,11 @@ scripts/build-kindle.sh
 Create the installable GitHub release ZIP with:
 
 ```bash
-scripts/package-release.sh 2.0.0
+scripts/package-release.sh 2.1.0
 ```
 
 The archive contains only `extensions/mtg-life-counter/`; runtime state and logs
-are excluded. See [`CHANGELOG.md`](CHANGELOG.md) for V2 release notes.
+are excluded. See [`CHANGELOG.md`](CHANGELOG.md) for release notes.
 
 Install over a mounted Kindle volume or MTP with:
 
@@ -122,10 +143,17 @@ Installation uses MTP because newer Kindles do not mount under `/Volumes` on mac
 6. Test poison tap/hold for all players.
 7. Test Monarch transfer and hold-to-clear.
 8. Test First-player triangles and `Pick First`.
-9. Test `New Game`, Menu input blocking, live battery percentage, front-light
+9. Test manual and automatic GAME OVER for every seat, panel-wide restoration,
+   persisted elimination, and New Game restoration.
+10. Test positive/negative life previews, opposite-direction netting, commander
+    refunds, independent seats, and three-second expiry.
+11. Test `New Game`, Menu input blocking, live battery percentage, front-light
    off/on restoration, Back, and immediate Exit.
-10. With the front light on, press sleep/wake and verify light-off, blocked touch,
-    and exact brightness restoration. Repeat with the light off and verify it
-    stays off after wake.
-11. Turn the front light on, press Exit, and verify the light turns off; relaunch
-    to verify V1 migration and V2 persistence.
+12. Leave the app untouched for at least 12 minutes and verify it remains awake.
+13. With the front light on, press the physical sleep button, leave the Kindle asleep
+    for at least 90 seconds, and verify it does not wake itself. Wake it and verify
+    blocked-while-asleep touch, working touch after wake, and exact brightness restoration.
+    Repeat with the light off and verify it stays off after wake.
+14. Turn the front light on, press Exit, and verify the light turns off. Leave the Kindle
+    untouched outside the app beyond its normal timeout and verify ordinary auto-sleep
+    returns; relaunch and verify migration/persistence.

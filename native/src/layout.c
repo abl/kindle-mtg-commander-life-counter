@@ -111,6 +111,16 @@ void game_layout_init(GameLayout *layout, double width, double height) {
 
         const double triangle_size = panel_width * 0.065;
         const double name_x = panel.x + panel.width * (right ? 0.08 : 0.92);
+        layout->player_name[player] = rect(
+            name_x - panel.width * 0.07,
+            panel.y + panel.height * 0.19,
+            panel.width * 0.14, panel.height * 0.62);
+        const double life_center_x = content.x + content.width / 2.0;
+        const double preview_center_x = (name_x + life_center_x) / 2.0;
+        layout->life_preview[player] = rect(
+            preview_center_x - panel.width * 0.09,
+            panel.y + panel.height * 0.39,
+            panel.width * 0.18, panel.height * 0.22);
         layout->marker_margin_x[player] =
             panel.x + panel.width * (right ? 0.05 : 0.95);
         layout->first_triangle[player][0] = centered_rect(
@@ -168,6 +178,31 @@ bool game_layout_hit_test(const GameLayout *layout, double x, double y,
         }
     }
     return false;
+}
+
+bool game_layout_hit_test_for_state(const GameLayout *layout,
+                                    const GameState *game,
+                                    double x, double y,
+                                    GameControl *control) {
+    if (!layout || !game || !control) return false;
+    *control = make_control(GAME_CONTROL_NONE, GAME_NO_PLAYER,
+                            GAME_NO_PLAYER, 0);
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        if (game->eliminated[player] &&
+            game_rect_contains(layout->panel[player], x, y)) {
+            *control = make_control(GAME_CONTROL_PLAYER_STATE, player,
+                                    GAME_NO_PLAYER, 0);
+            return true;
+        }
+    }
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        if (game_rect_contains(layout->player_name[player], x, y)) {
+            *control = make_control(GAME_CONTROL_PLAYER_STATE, player,
+                                    GAME_NO_PLAYER, 0);
+            return true;
+        }
+    }
+    return game_layout_hit_test(layout, x, y, control);
 }
 
 void game_hold_reset(GameHoldState *hold) {

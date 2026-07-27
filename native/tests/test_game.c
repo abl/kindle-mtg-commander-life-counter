@@ -33,6 +33,195 @@ static void test_reset_clears_v2_trackers(void) {
     }
 }
 
+static void test_reset_and_manual_player_state_hold_preserve_underlying_game(void) {
+    GameState game;
+    game_reset(&game);
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        assert(!game.eliminated[player]);
+    }
+    game.life[2] = 17;
+    game.poison[2] = 4;
+    game.commander_damage[2][1] = 8;
+    game.first_player = 2;
+    game.monarch_player = 2;
+    GameControl player_state = {
+        .type = GAME_CONTROL_PLAYER_STATE,
+        .player = 2,
+        .source = GAME_NO_PLAYER,
+        .delta = 0,
+    };
+
+    GameState before = game;
+    assert(!game_apply_tap(&game, player_state));
+    assert(game_apply_hold_from_snapshot(&game, &before, player_state));
+    assert(game.eliminated[2]);
+    assert(game.life[2] == 17);
+    assert(game.poison[2] == 4);
+    assert(game.commander_damage[2][1] == 8);
+    assert(game.first_player == 2);
+    assert(game.monarch_player == 2);
+
+    before = game;
+    assert(game_apply_hold_from_snapshot(&game, &before, player_state));
+    assert(!game.eliminated[2]);
+    assert(game.life[2] == 17);
+
+    game_reset(&game);
+    assert(!game.eliminated[2]);
+}
+
+static void test_life_threshold_eliminates_and_manual_restore_waits_for_mutation(void) {
+    GameState game;
+    game_reset(&game);
+    game.life[0] = 1;
+    GameControl minus = {
+        .type = GAME_CONTROL_LIFE,
+        .player = 0,
+        .source = GAME_NO_PLAYER,
+        .delta = -1,
+    };
+    GameControl player_state = {
+        .type = GAME_CONTROL_PLAYER_STATE,
+        .player = 0,
+        .source = GAME_NO_PLAYER,
+        .delta = 0,
+    };
+
+    assert(game_apply_tap(&game, minus));
+    assert(game.life[0] == 0);
+    assert(!game.eliminated[0]);
+    assert(game_evaluate_elimination_after_mutation(&game, 0));
+    assert(game.eliminated[0]);
+
+    GameState before = game;
+    assert(game_apply_hold_from_snapshot(&game, &before, player_state));
+    assert(!game.eliminated[0]);
+
+    GameControl crown = {
+        .type = GAME_CONTROL_MONARCH,
+        .player = 0,
+        .source = GAME_NO_PLAYER,
+        .delta = 0,
+    };
+    assert(game_apply_tap(&game, crown));
+    assert(!game.eliminated[0]);
+
+    GameControl poison = {
+        .type = GAME_CONTROL_POISON,
+        .player = 0,
+        .source = GAME_NO_PLAYER,
+        .delta = 0,
+    };
+    assert(game_apply_tap(&game, poison));
+    assert(game_evaluate_elimination_after_mutation(&game, 0));
+    assert(game.eliminated[0]);
+}
+
+static void test_poison_and_single_commander_thresholds_eliminate(void) {
+    GameState game;
+    game_reset(&game);
+    GameControl poison = {
+        .type = GAME_CONTROL_POISON,
+        .player = 1,
+        .source = GAME_NO_PLAYER,
+        .delta = 0,
+    };
+    game.poison[1] = 9;
+    assert(game_apply_tap(&game, poison));
+    assert(game.poison[1] == 10);
+    assert(!game.eliminated[1]);
+    assert(game_evaluate_elimination_after_mutation(&game, 1));
+    assert(game.eliminated[1]);
+
+    game_reset(&game);
+    game.commander_damage[3][0] = 10;
+    game.commander_damage[3][1] = 10;
+    GameControl commander = {
+        .type = GAME_CONTROL_COMMANDER,
+        .player = 3,
+        .source = 1,
+        .delta = 0,
+    };
+    assert(game_apply_tap(&game, commander));
+    assert(game.commander_damage[3][1] == 11);
+    assert(!game.eliminated[3]);
+
+    game.commander_damage[3][1] = 20;
+    assert(game_apply_tap(&game, commander));
+    assert(game.commander_damage[3][1] == 21);
+    assert(!game.eliminated[3]);
+    assert(game_evaluate_elimination_after_mutation(&game, 3));
+    assert(game.eliminated[3]);
+}
+
+static void test_provisional_threshold_taps_do_not_poison_final_hold_state(void) {
+    GameState game;
+    game_reset(&game);
+    game.poison[0] = 9;
+    GameControl poison = {
+        .type = GAME_CONTROL_POISON,
+        .player = 0,
+        .source = GAME_NO_PLAYER,
+        .delta = 0,
+    };
+    GameState before = game;
+    assert(game_apply_tap(&game, poison));
+    assert(game.poison[0] == 10);
+    assert(!game.eliminated[0]);
+    assert(game_apply_hold_from_snapshot(&game, &before, poison));
+    assert(game.poison[0] == 0);
+    assert(!game_evaluate_elimination_after_mutation(&game, 0));
+    assert(!game.eliminated[0]);
+
+    game_reset(&game);
+    game.commander_damage[1][2] = 20;
+    game.life[1] = 20;
+    GameControl commander = {
+        .type = GAME_CONTROL_COMMANDER,
+        .player = 1,
+        .source = 2,
+        .delta = 0,
+    };
+    before = game;
+    assert(game_apply_tap(&game, commander));
+    assert(game.commander_damage[1][2] == 21);
+    assert(game.life[1] == 19);
+    assert(!game.eliminated[1]);
+    assert(game_apply_hold_from_snapshot(&game, &before, commander));
+    assert(game.commander_damage[1][2] == 0);
+    assert(game.life[1] == 40);
+    assert(!game_evaluate_elimination_after_mutation(&game, 1));
+    assert(!game.eliminated[1]);
+}
+
+static void test_zero_clear_holds_are_not_final_mutations(void) {
+    const GameControl controls[] = {
+        {GAME_CONTROL_POISON, 0, GAME_NO_PLAYER, 1},
+        {GAME_CONTROL_COMMANDER, 0, 2, 1},
+    };
+    for (size_t index = 0; index < sizeof(controls) / sizeof(controls[0]);
+         ++index) {
+        GameState game;
+        game_reset(&game);
+        game.life[0] = 0;
+        GameState before = game;
+
+        assert(game_apply_tap(&game, controls[index]));
+        assert(game_apply_hold_from_snapshot(&game, &before, controls[index]));
+        assert(!game_control_changed_from_snapshot(&game, &before,
+                                                   controls[index]));
+        if (game_control_changed_from_snapshot(&game, &before,
+                                               controls[index])) {
+            (void)game_evaluate_elimination_after_mutation(&game, 0);
+        }
+        assert(!game.eliminated[0]);
+        assert(game.life[0] == before.life[0]);
+        assert(game.poison[0] == before.poison[0]);
+        assert(game.commander_damage[0][2] ==
+               before.commander_damage[0][2]);
+    }
+}
+
 static void test_commander_damage_tap_tracks_source_and_life(void) {
     GameState game;
     game_reset(&game);
@@ -257,6 +446,74 @@ static void test_game_control_equality_uses_every_identity_field(void) {
     assert(!game_control_equal(base, changed));
 }
 
+static void test_life_preview_accumulates_nets_and_independent_deadlines(void) {
+    GameLifePreview preview;
+    game_life_preview_reset(&preview);
+    char text[8];
+
+    assert(game_life_preview_record(&preview, 0, 40, 39, 1000));
+    assert(preview.visible[0]);
+    assert(preview.net[0] == -1);
+    assert(preview.expires_at_ms[0] == 4000);
+    assert(game_life_preview_format(&preview, 0, text, sizeof(text)));
+    assert(strcmp(text, "-01") == 0);
+
+    assert(game_life_preview_record(&preview, 0, 39, 30, 2000));
+    assert(preview.net[0] == -10);
+    assert(preview.expires_at_ms[0] == 5000);
+    assert(game_life_preview_format(&preview, 0, text, sizeof(text)));
+    assert(strcmp(text, "-10") == 0);
+
+    assert(game_life_preview_record(&preview, 1, 40, 48, 1500));
+    assert(preview.net[1] == 8);
+    assert(preview.expires_at_ms[1] == 4500);
+    assert(game_life_preview_format(&preview, 1, text, sizeof(text)));
+    assert(strcmp(text, "+08") == 0);
+    assert(preview.net[0] == -10);
+    assert(preview.expires_at_ms[0] == 5000);
+
+    assert(game_life_preview_record(&preview, 0, 30, 40, 2500));
+    assert(!preview.visible[0]);
+    assert(preview.net[0] == 0);
+    assert(preview.expires_at_ms[0] == 0);
+    assert(!game_life_preview_format(&preview, 0, text, sizeof(text)));
+}
+
+static void test_life_preview_expiry_clear_and_visual_clamp_preserve_true_net(void) {
+    GameLifePreview preview;
+    game_life_preview_reset(&preview);
+    char text[8];
+
+    assert(game_life_preview_record(&preview, 2, 0, INT_MAX, 10));
+    assert(preview.net[2] == INT_MAX);
+    assert(game_life_preview_format(&preview, 2, text, sizeof(text)));
+    assert(strcmp(text, "+99") == 0);
+
+    assert(game_life_preview_record(&preview, 2, INT_MAX, 98, 20));
+    assert(preview.net[2] == 98);
+    assert(game_life_preview_format(&preview, 2, text, sizeof(text)));
+    assert(strcmp(text, "+98") == 0);
+
+    assert(!game_life_preview_expire(&preview, 3019));
+    assert(preview.visible[2]);
+    assert(game_life_preview_expire(&preview, 3020));
+    assert(!preview.visible[2]);
+    assert(preview.net[2] == 0);
+
+    assert(game_life_preview_record(&preview, 3, 0, INT_MIN, 100));
+    assert(game_life_preview_format(&preview, 3, text, sizeof(text)));
+    assert(strcmp(text, "-99") == 0);
+    assert(game_life_preview_clear_player(&preview, 3));
+    assert(!game_life_preview_clear_player(&preview, 3));
+    assert(!preview.visible[3]);
+
+    assert(game_life_preview_record(&preview, 0, 40, 45, 1000));
+    assert(preview.net[0] == 5);
+    assert(game_life_preview_record(&preview, 0, 45, 46, 5000));
+    assert(preview.net[0] == 1);
+    assert(preview.expires_at_ms[0] == 8000);
+}
+
 static void test_state_round_trip(void) {
     char path[] = "/tmp/mtg-game-test-XXXXXX";
     int fd = mkstemp(path);
@@ -271,6 +528,8 @@ static void test_state_round_trip(void) {
     written.commander_damage[2][1] = 21;
     written.poison[1] = 4;
     written.poison[3] = 10;
+    written.eliminated[2] = true;
+    written.eliminated[3] = true;
     written.first_player = 3;
     written.monarch_player = 1;
     assert(game_save(&written, path));
@@ -281,12 +540,14 @@ static void test_state_round_trip(void) {
     assert(memcmp(written.commander_damage, loaded.commander_damage,
                   sizeof(written.commander_damage)) == 0);
     assert(memcmp(written.poison, loaded.poison, sizeof(written.poison)) == 0);
+    assert(memcmp(written.eliminated, loaded.eliminated,
+                  sizeof(written.eliminated)) == 0);
     assert(loaded.first_player == 3);
     assert(loaded.monarch_player == 1);
     unlink(path);
 }
 
-static void test_saved_state_declares_version_two(void) {
+static void test_saved_state_declares_version_three(void) {
     char path[] = "/tmp/mtg-game-version-XXXXXX";
     int fd = mkstemp(path);
     assert(fd >= 0);
@@ -300,8 +561,89 @@ static void test_saved_state_declares_version_two(void) {
     assert(file);
     char line[32];
     assert(fgets(line, sizeof(line), file));
-    assert(strcmp(line, "VERSION=2\n") == 0);
+    assert(strcmp(line, "VERSION=3\n") == 0);
     assert(fclose(file) == 0);
+    unlink(path);
+}
+
+static void test_v2_state_migrates_with_players_active(void) {
+    char path[] = "/tmp/mtg-game-v2-migrate-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    FILE *file = fdopen(fd, "w");
+    assert(file);
+    assert(fputs("VERSION=2\nP1=0\nP2=40\nP3=12\nP4=5\n", file) >= 0);
+    for (int recipient = 0; recipient < GAME_PLAYER_COUNT; ++recipient) {
+        for (int source = 0; source < GAME_PLAYER_COUNT; ++source) {
+            assert(fprintf(file, "CD%d%d=%d\n", recipient + 1, source + 1,
+                           recipient == 2 && source == 1 ? 21 : 0) > 0);
+        }
+    }
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        assert(fprintf(file, "POISON%d=%d\n", player + 1,
+                       player == 3 ? 10 : 0) > 0);
+    }
+    assert(fputs("FIRST=2\nMONARCH=4\n", file) >= 0);
+    assert(fclose(file) == 0);
+
+    GameState game;
+    assert(game_load(&game, path));
+    assert(game.life[0] == 0);
+    assert(game.commander_damage[2][1] == 21);
+    assert(game.poison[3] == 10);
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        assert(!game.eliminated[player]);
+    }
+    unlink(path);
+}
+
+static void rewrite_elim2_value(const char *path, int value) {
+    char replacement[] = "/tmp/mtg-game-v3-rewrite-XXXXXX";
+    int fd = mkstemp(replacement);
+    assert(fd >= 0);
+    FILE *input = fopen(path, "r");
+    FILE *output = fdopen(fd, "w");
+    assert(input && output);
+    char line[128];
+    bool replaced = false;
+    while (fgets(line, sizeof(line), input)) {
+        if (strncmp(line, "ELIM2=", 6) == 0) {
+            assert(fprintf(output, "ELIM2=%d\n", value) > 0);
+            replaced = true;
+        } else {
+            assert(fputs(line, output) >= 0);
+        }
+    }
+    assert(replaced);
+    assert(fclose(input) == 0);
+    assert(fclose(output) == 0);
+    assert(rename(replacement, path) == 0);
+}
+
+static void test_v3_rejects_duplicate_and_non_boolean_elimination(void) {
+    char path[] = "/tmp/mtg-game-v3-invalid-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    close(fd);
+    GameState saved;
+    game_reset(&saved);
+    saved.eliminated[1] = true;
+    assert(game_save(&saved, path));
+
+    FILE *file = fopen(path, "a");
+    assert(file);
+    assert(fputs("ELIM1=0\n", file) >= 0);
+    assert(fclose(file) == 0);
+    GameState target;
+    game_reset(&target);
+    target.life[0] = 777;
+    assert(!game_load(&target, path));
+    assert(target.life[0] == 777);
+
+    assert(game_save(&saved, path));
+    rewrite_elim2_value(path, 2);
+    assert(!game_load(&target, path));
+    assert(target.life[0] == 777);
     unlink(path);
 }
 
@@ -380,6 +722,11 @@ static void test_duplicate_state_key_is_rejected(void) {
 int main(void) {
     test_reset_and_adjust();
     test_reset_clears_v2_trackers();
+    test_reset_and_manual_player_state_hold_preserve_underlying_game();
+    test_life_threshold_eliminates_and_manual_restore_waits_for_mutation();
+    test_poison_and_single_commander_thresholds_eliminate();
+    test_provisional_threshold_taps_do_not_poison_final_hold_state();
+    test_zero_clear_holds_are_not_final_mutations();
     test_commander_damage_tap_tracks_source_and_life();
     test_commander_damage_hold_clears_and_refunds_life();
     test_commander_damage_actions_are_atomic_at_integer_limits();
@@ -393,8 +740,13 @@ int main(void) {
     test_monarch_hold_restores_press_time_owner();
     test_game_control_equality_uses_every_identity_field();
 
+    test_life_preview_accumulates_nets_and_independent_deadlines();
+    test_life_preview_expiry_clear_and_visual_clamp_preserve_true_net();
+
     test_state_round_trip();
-    test_saved_state_declares_version_two();
+    test_saved_state_declares_version_three();
+    test_v2_state_migrates_with_players_active();
+    test_v3_rejects_duplicate_and_non_boolean_elimination();
     test_v1_state_migrates_with_zeroed_v2_trackers();
     test_incomplete_v2_state_is_rejected();
     test_unversioned_state_rejects_v2_keys();

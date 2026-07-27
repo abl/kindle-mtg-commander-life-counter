@@ -6,12 +6,14 @@
 typedef bool (*DeviceReadInt)(void *context, const char *property, int *value);
 typedef bool (*DeviceWriteInt)(void *context, const char *property, int value);
 typedef bool (*DeviceReadSleeping)(void *context, bool *sleeping);
+typedef bool (*DevicePulseIdleTimeout)(void *context);
 
 typedef struct {
     void *context;
     DeviceReadInt read_int;
     DeviceWriteInt write_int;
     DeviceReadSleeping read_sleeping;
+    DevicePulseIdleTimeout pulse_idle_timeout;
 } DeviceBackend;
 
 typedef struct {
@@ -40,6 +42,12 @@ typedef enum {
     DEVICE_POWER_OBSERVED_AWAKE,
 } DevicePowerObservedState;
 
+typedef enum {
+    DEVICE_IDLE_TIMEOUT_FAILED,
+    DEVICE_IDLE_TIMEOUT_SKIPPED,
+    DEVICE_IDLE_TIMEOUT_APPLIED,
+} DeviceIdleTimeoutResult;
+
 typedef struct {
     bool sleeping;
     bool light_off;
@@ -50,6 +58,7 @@ typedef struct {
 
 DeviceBackend device_command_backend(DeviceCommandConfig *config);
 DeviceBackend device_lipc_backend(void);
+DeviceIdleTimeoutResult device_idle_timeout_pulse(DeviceBackend *backend);
 bool device_refresh(DeviceBackend *backend, DeviceStatus *status);
 bool device_toggle_front_light(DeviceBackend *backend, DeviceStatus *status,
                                int *remembered_brightness);

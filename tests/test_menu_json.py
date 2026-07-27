@@ -29,6 +29,12 @@ class MenuJsonTest(unittest.TestCase):
         header = binary.read_bytes()[:20]
         self.assertEqual(header[:4], b"\x7fELF")
         self.assertEqual(header[4], 1)  # ELF32
+        binary_payload = binary.read_bytes()
+        self.assertIn(b"touchScreenSaverTimeout", binary_payload)
+        self.assertNotIn(b"preventScreenSaver", binary_payload)
+        self.assertNotIn(b"--idle-timeout-pulse", binary_payload)
+        self.assertNotIn(b"--idle-inhibit", binary_payload)
+        self.assertTrue(binary.stat().st_mode & 0o111)
         self.assertEqual(int.from_bytes(header[18:20], "little"), 40)  # ARM
         self.assertFalse((EXTENSION / "data" / "state.txt").exists())
         self.assertFalse((EXTENSION / "assets" / "first-player.png").exists())
@@ -55,6 +61,24 @@ class MenuJsonTest(unittest.TestCase):
         self.assertIn("gtk_widget_set_sensitive(app->canvas, FALSE)", source)
         self.assertIn("gtk_widget_set_sensitive(app->canvas, settled)", source)
         self.assertIn("device_power_exit", source)
+        self.assertIn("draw_game_over", source)
+        self.assertIn('draw_text(cr, "GAME"', source)
+        self.assertIn('draw_text(cr, "OVER"', source)
+        self.assertIn("game_life_preview_format", source)
+        self.assertIn("game_life_preview_reset(&app->life_preview)", source)
+        self.assertIn("game_layout_hit_test_for_state", source)
+        self.assertIn("game_layout_hit_test(&app->layout, event->x, event->y,",
+                      source)
+        self.assertIn("restore_name_tap_from_snapshot", source)
+        self.assertIn("finalize_pending_loss_check(app)", source)
+        promotion = source[source.index("static void apply_hold_promotion"):
+                           source.index("static gboolean on_long_press")]
+        self.assertIn("game_control_changed_from_snapshot", promotion)
+        self.assertIn("final_mutation", promotion)
+        latch = source[source.index("static gboolean hit_test_gameplay"):
+                       source.index("static gboolean on_button_press")]
+        self.assertLess(latch.index("app->hold.promoted"),
+                        latch.index("game_layout_hit_test_for_state"))
         self.assertIn("static volatile sig_atomic_t termination_signal", source)
         self.assertIn("sigaction(SIGTERM", source)
         self.assertIn("poll_termination", source)
@@ -106,14 +130,39 @@ class MenuJsonTest(unittest.TestCase):
         self.assertIn("EXIT FAILED", source)
         self.assertIn("if (device_power_exit", source)
         launcher_source = (EXTENSION / "bin" / "launch.sh").read_text()
+        device_source = (ROOT / "native" / "src" / "device.c").read_text()
+        self.assertNotIn("lipc-set-prop", launcher_source)
+        self.assertNotIn("lipc-get-prop", launcher_source)
+        self.assertNotIn("MTG_IDLE", launcher_source)
+        self.assertNotIn("--idle-", launcher_source)
         self.assertNotIn("preventScreenSaver", launcher_source)
+        self.assertNotIn("preventScreenSaver", source)
+        self.assertNotIn("preventScreenSaver", device_source)
+        self.assertNotIn("--idle-inhibit", source)
+        self.assertNotIn("--idle-timeout-pulse", source)
+        self.assertIn("#define IDLE_TIMEOUT_PULSE_MS 60000", source)
+        self.assertIn("device_idle_timeout_pulse(&app->device_backend)", source)
+        self.assertIn("g_timeout_add(IDLE_TIMEOUT_PULSE_MS", source)
+        self.assertIn("cancel_idle_timeout_timer(app)", source)
         self.assertIn("kill -KILL", launcher_source)
+        self.assertNotIn("starting_pid=$!", launcher_source)
+        self.assertNotIn("child_starting", launcher_source)
+        self.assertIn("child_spawn_critical=1", launcher_source)
+        self.assertIn("finish_child_spawn_critical", launcher_source)
+        self.assertLess(launcher_source.index("trap restore EXIT"),
+                        launcher_source.index("if ! acquire_lock"))
+        spawn = launcher_source.index('"$BIN" "$STATE_FILE"')
+        self.assertLess(launcher_source.index("child_spawn_critical=1", spawn - 80),
+                        spawn)
+        self.assertLess(spawn, launcher_source.index("child_pid=$!", spawn))
+        self.assertLess(launcher_source.index("child_pid=$!", spawn),
+                        launcher_source.index("finish_child_spawn_critical", spawn))
         meson = (ROOT / "native" / "meson.build").read_text()
         self.assertIn("src/device.c", meson)
 
     def test_extension_declares_dynamic_kual_menu(self):
         root = ET.parse(EXTENSION / "config.xml").getroot()
-        self.assertEqual(root.findtext("./information/version"), "2.0.0")
+        self.assertEqual(root.findtext("./information/version"), "2.1.0")
         menu = root.find("./menus/menu")
 
         self.assertIsNotNone(menu)

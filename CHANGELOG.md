@@ -2,6 +2,33 @@
 
 All notable changes to the MTG Commander Life Counter are documented here.
 
+## [2.1.0] - 2026-07-27
+
+### Added
+
+- Reversible per-player `GAME OVER` panels activated manually or after completed
+  life, poison, and per-source commander-damage actions reach a loss threshold.
+- Independent three-second signed life-change previews with true-net accumulation
+  and display-only clamping at `+99`/`-99`.
+- Inactivity-only keep-awake pulses while the app is active, without disabling the
+  Kindle's physical sleep button or changing its persistent sleep timeout.
+
+### Compatibility and migration
+
+- V3 state persistence stores all four elimination flags atomically.
+- V1 and V2 saves continue to load with every player active by default.
+- Existing V2 typography, icons, tabletop orientation, physical-button sleep,
+  front-light restoration, and touch gating remain unchanged.
+- The rejected `preventScreenSaver` inhibitor is absent from the production path. A
+  bounded adapter instead resets `touchScreenSaverTimeout` once per minute only in exact
+  `active` power state;
+  both the private approach-level probe and exact integrated package preserved physical
+  sleep/wake and restored ordinary auto-sleep after Exit.
+- The exact release candidate passed transactional MTP readback verification and focused
+  Paperwhite acceptance: 12 minutes awake untouched, 90 seconds physically asleep,
+  successful wake/touch, and ordinary auto-sleep within 12 minutes after Exit. See
+  [`docs/v2.1-device-acceptance.md`](docs/v2.1-device-acceptance.md).
+
 ## [2.0.0] - 2026-07-14
 
 ### Added

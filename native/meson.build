@@ -1,7 +1,7 @@
 project(
   'mtg-commander-life-counter',
   'c',
-  version: '2.0.0',
+  version: '2.1.0',
   default_options: ['c_std=c11', 'warning_level=2', 'werror=true'],
   meson_version: '>=1.1',
 )

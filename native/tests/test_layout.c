@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 static bool near(double actual, double expected) {
     return fabs(actual - expected) < 0.01;
@@ -162,6 +163,83 @@ static void test_visual_subregions_match_annotated_positions(void) {
     }
 }
 
+static void test_name_and_preview_geometry_is_player_local(void) {
+    GameLayout layout;
+    game_layout_init(&layout, 758.0, 1024.0);
+
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        GameRect panel = layout.panel[player];
+        GameRect name = layout.player_name[player];
+        GameRect preview = layout.life_preview[player];
+        GameRect content = layout.content[player];
+        assert(name.x >= panel.x);
+        assert(name.y >= panel.y);
+        assert(name.x + name.width <= panel.x + panel.width);
+        assert(name.y + name.height <= panel.y + panel.height);
+        assert(preview.x >= panel.x);
+        assert(preview.y >= panel.y);
+        assert(preview.x + preview.width <= panel.x + panel.width);
+        assert(preview.y + preview.height <= panel.y + panel.height);
+
+        double name_x = center_x(name);
+        double life_x = center_x(content);
+        double preview_x = center_x(preview);
+        if (name_x < life_x) {
+            assert(name_x < preview_x && preview_x < life_x);
+        } else {
+            assert(life_x < preview_x && preview_x < name_x);
+        }
+        assert(near(center_y(name), center_y(panel)));
+        assert(near(center_y(preview), center_y(panel)));
+    }
+}
+
+static void test_state_aware_hit_testing_blocks_eliminated_panels(void) {
+    GameLayout layout;
+    game_layout_init(&layout, 758.0, 1024.0);
+    GameState game;
+    game_reset(&game);
+
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        GameRect name = layout.player_name[player];
+        GameControl control = {0};
+        assert(game_layout_hit_test_for_state(
+            &layout, &game, center_x(name), center_y(name), &control));
+        assert(control.type == GAME_CONTROL_PLAYER_STATE);
+        assert(control.player == player);
+
+        game.eliminated[player] = true;
+        GameRect panel = layout.panel[player];
+        const double points[][2] = {
+            {panel.x + 2.0, panel.y + 2.0},
+            {center_x(panel), center_y(panel)},
+            {panel.x + panel.width - 2.0, panel.y + panel.height - 2.0},
+        };
+        for (size_t point = 0; point < sizeof(points) / sizeof(points[0]); ++point) {
+            memset(&control, 0, sizeof(control));
+            assert(game_layout_hit_test_for_state(
+                &layout, &game, points[point][0], points[point][1], &control));
+            assert(control.type == GAME_CONTROL_PLAYER_STATE);
+            assert(control.player == player);
+        }
+        game.eliminated[player] = false;
+    }
+
+    GameRect minus = layout.life_minus[0];
+    GameControl control = {0};
+    assert(game_layout_hit_test_for_state(
+        &layout, &game, center_x(minus), center_y(minus), &control));
+    assert(control.type == GAME_CONTROL_LIFE);
+    game.eliminated[0] = true;
+    assert(game_layout_hit_test_for_state(
+        &layout, &game, center_x(minus), center_y(minus), &control));
+    assert(control.type == GAME_CONTROL_PLAYER_STATE);
+
+    assert(!game_layout_hit_test_for_state(
+        &layout, &game, center_x(layout.toolbar_item[1]),
+        center_y(layout.toolbar_item[1]), &control));
+}
+
 static void test_hold_state_promotes_once_and_swallows_late_duplicates(void) {
     GameHoldState hold;
     game_hold_reset(&hold);
@@ -203,6 +281,8 @@ int main(void) {
     test_hit_testing_prioritizes_v2_controls();
     test_rectangles_use_half_open_boundaries();
     test_visual_subregions_match_annotated_positions();
+    test_name_and_preview_geometry_is_player_local();
+    test_state_aware_hit_testing_blocks_eliminated_panels();
     test_hold_state_promotes_once_and_swallows_late_duplicates();
     puts("PASS layout core");
     return 0;

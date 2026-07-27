@@ -19,6 +19,8 @@ typedef struct {
     GameRect toolbar_item[3];
     GameRect panel[GAME_PLAYER_COUNT];
     GameRect content[GAME_PLAYER_COUNT];
+    GameRect player_name[GAME_PLAYER_COUNT];
+    GameRect life_preview[GAME_PLAYER_COUNT];
     GameRect commander[GAME_PLAYER_COUNT][GAME_PLAYER_COUNT];
     GameRect commander_label[GAME_PLAYER_COUNT][GAME_PLAYER_COUNT];
     GameRect commander_value[GAME_PLAYER_COUNT][GAME_PLAYER_COUNT];
@@ -51,6 +53,10 @@ void game_layout_init(GameLayout *layout, double width, double height);
 bool game_rect_contains(GameRect rect, double x, double y);
 bool game_layout_hit_test(const GameLayout *layout, double x, double y,
                           GameControl *control);
+bool game_layout_hit_test_for_state(const GameLayout *layout,
+                                    const GameState *game,
+                                    double x, double y,
+                                    GameControl *control);
 void game_hold_reset(GameHoldState *hold);
 GameHoldDecision game_hold_press(GameHoldState *hold, GameControl control);
 bool game_hold_timeout(GameHoldState *hold);

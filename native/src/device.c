@@ -18,6 +18,7 @@
 #define DEFAULT_LIGHT_MAX 24
 #define LIPC_TIMEOUT_MS 500
 #define WAIT_INTERVAL_MS 10
+#define IDLE_TIMEOUT_PULSE_PROPERTY "touchScreenSaverTimeout"
 
 static long long monotonic_milliseconds(void) {
     struct timespec now;
@@ -218,7 +219,8 @@ static bool command_read_sleeping(void *context, bool *sleeping) {
     return false;
 }
 
-static bool command_write_int(void *context, const char *property, int value) {
+static bool command_write_int_mode(void *context, const char *property, int value,
+                                   bool explicit_integer) {
     DeviceCommandConfig *config = context;
     if (!config || !config->set_program || !config->timeout_ms || !property) {
         return false;
@@ -237,8 +239,13 @@ static bool command_write_int(void *context, const char *property, int value) {
         if (setpgid(0, 0) != 0) _exit(127);
         redirect_to_null(STDOUT_FILENO);
         redirect_to_null(STDERR_FILENO);
-        execlp(config->set_program, config->set_program, POWERD_SERVICE,
-               property, value_text, (char *)NULL);
+        if (explicit_integer) {
+            execlp(config->set_program, config->set_program, "-i",
+                   POWERD_SERVICE, property, value_text, (char *)NULL);
+        } else {
+            execlp(config->set_program, config->set_program, POWERD_SERVICE,
+                   property, value_text, (char *)NULL);
+        }
         _exit(127);
     }
     if (!establish_process_group(pid)) {
@@ -248,12 +255,21 @@ static bool command_write_int(void *context, const char *property, int value) {
     return wait_for_success_until(pid, deadline);
 }
 
+static bool command_write_int(void *context, const char *property, int value) {
+    return command_write_int_mode(context, property, value, false);
+}
+
+static bool command_pulse_idle_timeout(void *context) {
+    return command_write_int_mode(context, IDLE_TIMEOUT_PULSE_PROPERTY, 1, true);
+}
+
 DeviceBackend device_command_backend(DeviceCommandConfig *config) {
     DeviceBackend backend = {
         .context = config,
         .read_int = command_read_int,
         .write_int = command_write_int,
         .read_sleeping = command_read_sleeping,
+        .pulse_idle_timeout = command_pulse_idle_timeout,
     };
     return backend;
 }
@@ -265,6 +281,19 @@ DeviceBackend device_lipc_backend(void) {
         .timeout_ms = LIPC_TIMEOUT_MS,
     };
     return device_command_backend(&config);
+}
+
+DeviceIdleTimeoutResult device_idle_timeout_pulse(DeviceBackend *backend) {
+    if (!backend || !backend->read_sleeping || !backend->pulse_idle_timeout) {
+        return DEVICE_IDLE_TIMEOUT_FAILED;
+    }
+    bool sleeping = false;
+    if (!backend->read_sleeping(backend->context, &sleeping)) {
+        return DEVICE_IDLE_TIMEOUT_FAILED;
+    }
+    if (sleeping) return DEVICE_IDLE_TIMEOUT_SKIPPED;
+    return backend->pulse_idle_timeout(backend->context)
+        ? DEVICE_IDLE_TIMEOUT_APPLIED : DEVICE_IDLE_TIMEOUT_FAILED;
 }
 
 bool device_refresh(DeviceBackend *backend, DeviceStatus *status) {

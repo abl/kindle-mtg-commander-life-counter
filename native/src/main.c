@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef M_PI
@@ -27,6 +28,7 @@
 #define POWER_RESTART_MIN_MS 250
 #define POWER_RESTART_MAX_MS 8000
 #define POWER_RESTART_STABLE_MS 30000
+#define IDLE_TIMEOUT_PULSE_MS 60000
 
 typedef enum {
     OVERLAY_NONE,
@@ -39,6 +41,9 @@ typedef struct {
     GtkWidget *canvas;
     GameState game;
     GameState hold_before;
+    GameControl hold_tap_control;
+    gboolean hold_tap_applied;
+    GameLifePreview life_preview;
     GameLayout layout;
     GameHoldState hold;
     DeviceBackend device_backend;
@@ -48,6 +53,7 @@ typedef struct {
     char state_path[1024];
     OverlayMode overlay;
     guint long_press_timer;
+    guint life_preview_timer;
     GPid power_pid;
     GIOChannel *power_channel;
     guint power_io_watch;
@@ -55,6 +61,7 @@ typedef struct {
     guint power_restart_timer;
     guint power_stability_timer;
     guint power_reconcile_timer;
+    guint idle_timeout_timer;
     gint64 power_reconcile_due_us;
     guint power_restart_delay_ms;
     char power_event_line[POWER_EVENT_LINE_MAX];
@@ -62,9 +69,12 @@ typedef struct {
     gboolean power_event_line_overflow;
     gboolean shutting_down;
     gboolean exit_failed;
+    gboolean pending_loss_check;
+    int pending_loss_player;
 } App;
 
 static volatile sig_atomic_t termination_signal;
+static void expire_life_previews_now(App *app);
 
 static void request_termination(int signal_number) {
     termination_signal = signal_number;
@@ -287,17 +297,28 @@ static void draw_first_triangles(cairo_t *cr, const App *app, int player) {
 
 static void draw_player_name(cairo_t *cr, const App *app, int player) {
     GameRect panel = app->layout.panel[player];
-    const gboolean right = player == 1 || player == 2;
     char label[24];
     snprintf(label, sizeof(label), "PLAYER %d", player + 1);
-    cairo_save(cr);
-    cairo_translate(cr, panel.x + panel.width * (right ? 0.08 : 0.92),
-                    panel.y + panel.height * 0.5);
-    cairo_rotate(cr, player_angle(player));
     set_gray(cr, 0.04);
-    draw_text(cr, label, -panel.height * 0.31, -panel.width * 0.055,
-              panel.height * 0.62, panel.width * 0.11,
-              panel.width * 0.058, TRUE);
+    draw_rotated_text(cr, label, app->layout.player_name[player],
+                      panel.width * 0.058, player_angle(player));
+}
+
+static void draw_game_over(cairo_t *cr, GameRect panel, double angle) {
+    const double local_width = panel.height;
+    const double local_height = panel.width;
+    const double line_height = local_height * 0.25;
+    const double text_size = minimum(local_width * 0.17,
+                                     local_height * 0.19);
+    cairo_save(cr);
+    cairo_translate(cr, panel.x + panel.width / 2.0,
+                    panel.y + panel.height / 2.0);
+    cairo_rotate(cr, angle);
+    set_gray(cr, 1.0);
+    draw_text(cr, "GAME", -local_width / 2.0, -local_height * 0.28,
+              local_width, line_height, text_size, TRUE);
+    draw_text(cr, "OVER", -local_width / 2.0, local_height * 0.03,
+              local_width, line_height, text_size, TRUE);
     cairo_restore(cr);
 }
 
@@ -312,12 +333,26 @@ static void draw_player(cairo_t *cr, const App *app, int player) {
     cairo_rectangle(cr, panel.x, panel.y, panel.width, panel.height);
     cairo_fill(cr);
 
+    if (app->game.eliminated[player]) {
+        set_gray(cr, 0.0);
+        cairo_rectangle(cr, panel.x, panel.y, panel.width, panel.height);
+        cairo_fill(cr);
+        draw_game_over(cr, panel, angle);
+        return;
+    }
+
     set_gray(cr, 0.04);
     double current_size = minimum(content.width * 0.55, content.height * 0.38);
     size_t life_length = strlen(life);
     if (life_length > 3) current_size *= 3.0 / life_length;
     const double life_size = current_size * 1.25;
     draw_life_text(cr, life, content, current_size, life_size, angle);
+    char preview[8];
+    if (game_life_preview_format(&app->life_preview, player,
+                                 preview, sizeof(preview))) {
+        draw_rotated_text(cr, preview, app->layout.life_preview[player],
+                          panel.width * 0.075, angle);
+    }
     draw_rotated_text(cr, "−", app->layout.life_minus_visual[player],
                       panel.width * 0.085, angle);
     draw_rotated_text(cr, "+", app->layout.life_plus_visual[player],
@@ -524,6 +559,7 @@ static void draw_menu(cairo_t *cr, const App *app,
 
 static gboolean on_expose(GtkWidget *widget, GdkEventExpose *event, gpointer data) {
     App *app = data;
+    expire_life_previews_now(app);
     GdkWindow *window = gtk_widget_get_window(widget);
     if (!window) return FALSE;
     GtkAllocation allocation;
@@ -571,14 +607,125 @@ static void queue_player(App *app, int player) {
                                (int)ceil(panel.width), (int)ceil(panel.height));
 }
 
+static gint64 life_preview_now_ms(void) {
+#if defined(CLOCK_BOOTTIME)
+    struct timespec time;
+    if (clock_gettime(CLOCK_BOOTTIME, &time) == 0) {
+        return (gint64)time.tv_sec * 1000 + time.tv_nsec / 1000000;
+    }
+#endif
+    return g_get_monotonic_time() / 1000;
+}
+
+static void schedule_life_preview_timer(App *app);
+
+static void expire_life_previews_now(App *app) {
+    gboolean was_visible[GAME_PLAYER_COUNT];
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        was_visible[player] = app->life_preview.visible[player];
+    }
+    if (game_life_preview_expire(&app->life_preview,
+                                 life_preview_now_ms())) {
+        for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+            if (was_visible[player] && !app->life_preview.visible[player]) {
+                queue_player(app, player);
+            }
+        }
+    }
+    schedule_life_preview_timer(app);
+}
+
+static gboolean on_life_preview_timer(gpointer data) {
+    App *app = data;
+    app->life_preview_timer = 0;
+    expire_life_previews_now(app);
+    return FALSE;
+}
+
+static void schedule_life_preview_timer(App *app) {
+    if (app->life_preview_timer) {
+        g_source_remove(app->life_preview_timer);
+        app->life_preview_timer = 0;
+    }
+    gint64 earliest = INT64_MAX;
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        if (app->life_preview.visible[player] &&
+            app->life_preview.expires_at_ms[player] < earliest) {
+            earliest = app->life_preview.expires_at_ms[player];
+        }
+    }
+    if (earliest == INT64_MAX) return;
+    const gint64 now = life_preview_now_ms();
+    const gint64 remaining = earliest > now ? earliest - now : 1;
+    const guint delay = remaining > G_MAXUINT ? G_MAXUINT : (guint)remaining;
+    app->life_preview_timer = g_timeout_add(delay, on_life_preview_timer, app);
+}
+
+static void cancel_life_preview_timer(App *app) {
+    if (!app->life_preview_timer) return;
+    g_source_remove(app->life_preview_timer);
+    app->life_preview_timer = 0;
+}
+
+static gboolean control_tracks_loss(GameControl control) {
+    return control.type == GAME_CONTROL_LIFE ||
+           control.type == GAME_CONTROL_COMMANDER ||
+           control.type == GAME_CONTROL_POISON;
+}
+
+static void finish_game_mutation(App *app, GameControl control,
+                                 int life_before, gboolean evaluate_loss) {
+    if (control.player >= 0 && control.player < GAME_PLAYER_COUNT) {
+        if (evaluate_loss && control_tracks_loss(control)) {
+            (void)game_evaluate_elimination_after_mutation(
+                &app->game, control.player);
+        }
+        (void)game_life_preview_record(
+            &app->life_preview, control.player, life_before,
+            app->game.life[control.player], life_preview_now_ms());
+        if (app->game.eliminated[control.player]) {
+            (void)game_life_preview_clear_player(&app->life_preview,
+                                                 control.player);
+        }
+        schedule_life_preview_timer(app);
+    }
+    const gboolean provisional = !evaluate_loss && control_tracks_loss(control);
+    if (!provisional) persist(app);
+    if (control.type == GAME_CONTROL_MONARCH ||
+        control.type == GAME_CONTROL_PLAYER_STATE) {
+        gtk_widget_queue_draw(app->canvas);
+    } else {
+        queue_player(app, control.player);
+    }
+}
+
+static void finalize_pending_loss_check(App *app) {
+    if (!app->pending_loss_check) return;
+    const int player = app->pending_loss_player;
+    app->pending_loss_check = FALSE;
+    app->pending_loss_player = GAME_NO_PLAYER;
+    const gboolean eliminated =
+        game_evaluate_elimination_after_mutation(&app->game, player);
+    if (eliminated) {
+        (void)game_life_preview_clear_player(&app->life_preview, player);
+        schedule_life_preview_timer(app);
+        queue_player(app, player);
+    }
+    persist(app);
+}
+
 static void cancel_hold_timer(App *app) {
     if (app->long_press_timer) g_source_remove(app->long_press_timer);
     app->long_press_timer = 0;
 }
 
 static void cancel_hold(App *app) {
+    finalize_pending_loss_check(app);
     cancel_hold_timer(app);
     game_hold_reset(&app->hold);
+    app->hold_tap_applied = FALSE;
+    app->hold_tap_control = (GameControl){
+        GAME_CONTROL_NONE, GAME_NO_PLAYER, GAME_NO_PLAYER, 0};
 }
 
 static gboolean start_power_watch(App *app);
@@ -672,6 +819,7 @@ static void reconcile_power_state(App *app) {
         settled = !app->power.sleeping && !app->power.restore_light;
         gtk_widget_set_sensitive(app->canvas, settled);
         if (settled) {
+            expire_life_previews_now(app);
             gtk_widget_queue_draw(app->canvas);
         } else {
             cancel_hold(app);
@@ -933,10 +1081,32 @@ static gboolean on_window_delete(GtkWidget *widget, GdkEvent *event,
     return TRUE;
 }
 
+static gboolean on_idle_timeout_timer(gpointer data) {
+    App *app = data;
+    if (app->shutting_down) {
+        app->idle_timeout_timer = 0;
+        return FALSE;
+    }
+    DeviceIdleTimeoutResult result =
+        device_idle_timeout_pulse(&app->device_backend);
+    if (result == DEVICE_IDLE_TIMEOUT_FAILED) {
+        fprintf(stderr, "Could not reset the idle sleep timeout\n");
+    }
+    return TRUE;
+}
+
+static void cancel_idle_timeout_timer(App *app) {
+    if (!app->idle_timeout_timer) return;
+    g_source_remove(app->idle_timeout_timer);
+    app->idle_timeout_timer = 0;
+}
+
 static void on_window_destroy(GtkWidget *widget, gpointer data) {
     (void)widget;
     App *app = data;
     cancel_hold(app);
+    cancel_life_preview_timer(app);
+    cancel_idle_timeout_timer(app);
     stop_power_watch(app);
     gtk_main_quit();
 }
@@ -955,16 +1125,38 @@ static gboolean poll_termination(gpointer data) {
     return FALSE;
 }
 
+static void restore_name_tap_from_snapshot(App *app) {
+    if (!app->hold_tap_applied) return;
+    GameControl tap = app->hold_tap_control;
+    if (tap.type == GAME_CONTROL_LIFE) {
+        app->game.life[tap.player] = app->hold_before.life[tap.player];
+    } else if (tap.type == GAME_CONTROL_COMMANDER) {
+        app->game.life[tap.player] = app->hold_before.life[tap.player];
+        app->game.commander_damage[tap.player][tap.source] =
+            app->hold_before.commander_damage[tap.player][tap.source];
+    } else if (tap.type == GAME_CONTROL_POISON) {
+        app->game.poison[tap.player] = app->hold_before.poison[tap.player];
+    } else if (tap.type == GAME_CONTROL_MONARCH) {
+        app->game.monarch_player = app->hold_before.monarch_player;
+    }
+}
+
 static void apply_hold_promotion(App *app) {
     if (!app->hold.active) return;
     GameControl control = app->hold.control;
+    int life_before = app->game.life[control.player];
+    if (control.type == GAME_CONTROL_PLAYER_STATE &&
+        !app->hold_before.eliminated[control.player]) {
+        restore_name_tap_from_snapshot(app);
+    }
     if (game_apply_hold_from_snapshot(&app->game, &app->hold_before, control)) {
-        persist(app);
-        if (control.type == GAME_CONTROL_MONARCH) {
-            gtk_widget_queue_draw(app->canvas);
-        } else {
-            queue_player(app, control.player);
-        }
+        const gboolean final_mutation = game_control_changed_from_snapshot(
+            &app->game, &app->hold_before, control);
+        app->pending_loss_check = FALSE;
+        app->pending_loss_player = GAME_NO_PLAYER;
+        finish_game_mutation(app, control, life_before, final_mutation);
+    } else {
+        finalize_pending_loss_check(app);
     }
 }
 
@@ -987,6 +1179,8 @@ static gboolean handle_overlay(App *app, double x, double y,
             app->overlay = OVERLAY_NONE;
         } else if (game_rect_contains(reset, x, y)) {
             game_reset(&app->game);
+            game_life_preview_reset(&app->life_preview);
+            cancel_life_preview_timer(app);
             app->overlay = OVERLAY_NONE;
             persist(app);
         }
@@ -1025,6 +1219,25 @@ static gboolean handle_overlay(App *app, double x, double y,
     return FALSE;
 }
 
+static gboolean hit_test_gameplay(App *app, double x, double y,
+                                  GameControl *control) {
+    if (app->hold.active && app->hold.promoted) {
+        *control = app->hold.control;
+        return TRUE;
+    }
+    if (app->hold.active &&
+        app->hold.control.type != GAME_CONTROL_PLAYER_STATE) {
+        GameControl legacy;
+        if (game_layout_hit_test(&app->layout, x, y, &legacy) &&
+            game_control_equal(legacy, app->hold.control)) {
+            *control = legacy;
+            return TRUE;
+        }
+    }
+    return game_layout_hit_test_for_state(&app->layout, &app->game,
+                                          x, y, control);
+}
+
 static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event,
                                 gpointer data) {
     App *app = data;
@@ -1041,6 +1254,8 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event,
         return handle_overlay(app, event->x, event->y,
                               allocation.width, allocation.height);
     }
+
+    if (app->hold.active && app->hold.promoted) return TRUE;
 
     for (int item = 0; item < 3; ++item) {
         if (!game_rect_contains(app->layout.toolbar_item[item],
@@ -1063,26 +1278,42 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event,
     }
 
     GameControl control;
-    if (!game_layout_hit_test(&app->layout, event->x, event->y, &control)) {
+    if (!hit_test_gameplay(app, event->x, event->y, &control)) {
         cancel_hold(app);
         return TRUE;
     }
     if (app->hold.active && !game_control_equal(app->hold.control, control)) {
         cancel_hold(app);
+        if (!hit_test_gameplay(app, event->x, event->y, &control)) return TRUE;
     }
 
     GameHoldDecision decision = game_hold_press(&app->hold, control);
     if (decision == GAME_HOLD_START) {
         app->hold_before = app->game;
+        app->hold_tap_applied = FALSE;
+        app->hold_tap_control = (GameControl){
+            GAME_CONTROL_NONE, GAME_NO_PLAYER, GAME_NO_PLAYER, 0};
         cancel_hold_timer(app);
         app->long_press_timer = g_timeout_add(LONG_PRESS_DELAY_MS,
                                               on_long_press, app);
-        if (game_apply_tap(&app->game, control)) {
-            persist(app);
-            if (control.type == GAME_CONTROL_MONARCH) {
-                gtk_widget_queue_draw(app->canvas);
-            } else {
-                queue_player(app, control.player);
+        GameControl tap_control = control;
+        if (control.type == GAME_CONTROL_PLAYER_STATE &&
+            !app->game.eliminated[control.player]) {
+            if (!game_layout_hit_test(&app->layout, event->x, event->y,
+                                      &tap_control)) {
+                tap_control = (GameControl){
+                    GAME_CONTROL_NONE, GAME_NO_PLAYER, GAME_NO_PLAYER, 0};
+            }
+        }
+        if (tap_control.type != GAME_CONTROL_NONE) {
+            int life_before = app->game.life[tap_control.player];
+            if (game_apply_tap(&app->game, tap_control)) {
+                app->hold_tap_applied = TRUE;
+                app->hold_tap_control = tap_control;
+                app->pending_loss_check = control_tracks_loss(tap_control);
+                app->pending_loss_player = app->pending_loss_check
+                    ? tap_control.player : GAME_NO_PLAYER;
+                finish_game_mutation(app, tap_control, life_before, FALSE);
             }
         }
     } else if (decision == GAME_HOLD_PROMOTE) {
@@ -1111,7 +1342,7 @@ static gboolean on_motion(GtkWidget *widget, GdkEventMotion *event,
     gtk_widget_get_allocation(widget, &allocation);
     game_layout_init(&app->layout, allocation.width, allocation.height);
     GameControl control;
-    if (!game_layout_hit_test(&app->layout, event->x, event->y, &control) ||
+    if (!hit_test_gameplay(app, event->x, event->y, &control) ||
         !game_control_equal(app->hold.control, control)) {
         cancel_hold(app);
     }
@@ -1122,7 +1353,8 @@ static gboolean on_leave(GtkWidget *widget, GdkEventCrossing *event,
                          gpointer data) {
     (void)widget;
     (void)event;
-    cancel_hold(data);
+    App *app = data;
+    if (!app->hold.promoted) cancel_hold(app);
     return TRUE;
 }
 
@@ -1154,6 +1386,8 @@ int main(int argc, char **argv) {
     App app;
     memset(&app, 0, sizeof(app));
     game_hold_reset(&app.hold);
+    game_life_preview_reset(&app.life_preview);
+    app.pending_loss_player = GAME_NO_PLAYER;
     device_power_state_init(&app.power);
     app.device_backend = device_lipc_backend();
     const char *state_path = argc > 1 ? argv[1] :
@@ -1192,6 +1426,11 @@ int main(int argc, char **argv) {
     gtk_widget_show_all(app.window);
     if (!start_power_watch(&app)) schedule_power_restart(&app);
     reconcile_power_state(&app);
+    app.idle_timeout_timer = g_timeout_add(IDLE_TIMEOUT_PULSE_MS,
+                                           on_idle_timeout_timer, &app);
+    if (!app.idle_timeout_timer) {
+        fprintf(stderr, "Could not start the idle sleep timeout timer\n");
+    }
     (void)g_timeout_add(100, poll_termination, &app);
     gtk_main();
     return 0;

@@ -11,14 +11,17 @@ INSTALL_LOCK="$DATA_DIR/install.lock"
 LOG_FILE="$APP_DIR/app.log"
 child_pid=
 child_reaped=0
+child_spawn_critical=0
 lock_owned=0
+lock_created=0
 guard_owned=0
+guard_critical=0
+deferred_shutdown=0
 grace_steps=${MTG_SHUTDOWN_GRACE_STEPS:-5}
 
 case "$grace_steps" in
   '' | *[!0-9]*) grace_steps=5 ;;
 esac
-
 mkdir -p "$DATA_DIR" 2>/dev/null || exit 1
 
 valid_pid() {
@@ -34,61 +37,73 @@ lock_pid_from() {
 
 release_guard() {
   [ "$guard_owned" = 1 ] || return 0
-  owner=$(lock_pid_from "$LOCK_GUARD")
-  if [ "$owner" = "$$" ]; then
-    rm -f "$LOCK_GUARD/pid" 2>/dev/null || true
-    rmdir "$LOCK_GUARD" 2>/dev/null || true
-  fi
-  guard_owned=0
-}
-
-acquire_guard() {
-  candidate="$DATA_DIR/.app.lock.guard.$$"
-  stale="$DATA_DIR/.app.lock.guard.stale.$$"
-  rm -rf "$candidate" "$stale" 2>/dev/null || true
-  mkdir "$candidate" 2>/dev/null || return 1
-  if ! printf '%s\n' "$$" >"$candidate/pid"; then
-    rm -rf "$candidate" 2>/dev/null || true
-    return 1
-  fi
-
-  if [ -e "$LOCK_GUARD" ]; then
-    observed=$(lock_pid_from "$LOCK_GUARD")
-    if ! valid_pid "$observed" || kill -0 "$observed" 2>/dev/null; then
-      rm -rf "$candidate" 2>/dev/null || true
-      return 1
-    fi
-    if ! mv "$LOCK_GUARD" "$stale" 2>/dev/null; then
-      rm -rf "$candidate" 2>/dev/null || true
-      return 1
-    fi
-    moved=$(lock_pid_from "$stale")
-    if [ "$moved" != "$observed" ]; then
-      [ -e "$LOCK_GUARD" ] || mv "$stale" "$LOCK_GUARD" 2>/dev/null || true
-      rm -rf "$candidate" 2>/dev/null || true
-      return 1
-    fi
-    rm -rf "$stale" 2>/dev/null || true
-  fi
-
-  mv "$candidate" "$LOCK_GUARD" 2>/dev/null || true
+  guard_critical=1
   owner=$(lock_pid_from "$LOCK_GUARD")
   if [ "$owner" != "$$" ]; then
-    rm -rf "$LOCK_GUARD/.app.lock.guard.$$" "$candidate" 2>/dev/null || true
+    finish_guard_critical
     return 1
   fi
-  guard_owned=1
+  rm -f "$LOCK_GUARD/pid" 2>/dev/null || true
+  if ! rmdir "$LOCK_GUARD" 2>/dev/null; then
+    printf '%s\n' "$$" >"$LOCK_GUARD/pid" 2>/dev/null || true
+    finish_guard_critical
+    return 1
+  fi
+  guard_owned=0
+  finish_guard_critical
   return 0
 }
 
+publish_guard() {
+  guard_critical=1
+  if ! mkdir "$LOCK_GUARD" 2>/dev/null; then
+    finish_guard_critical
+    return 1
+  fi
+  if ! printf '%s\n' "$$" >"$LOCK_GUARD/pid"; then
+    rm -f "$LOCK_GUARD/pid" 2>/dev/null || true
+    rmdir "$LOCK_GUARD" 2>/dev/null || true
+    finish_guard_critical
+    return 1
+  fi
+  owner=$(lock_pid_from "$LOCK_GUARD")
+  if [ "$owner" != "$$" ]; then
+    finish_guard_critical
+    return 1
+  fi
+  guard_owned=1
+  finish_guard_critical
+  return 0
+}
+
+acquire_guard() {
+  publish_guard && return 0
+  observed=$(lock_pid_from "$LOCK_GUARD")
+  if ! valid_pid "$observed" || kill -0 "$observed" 2>/dev/null; then
+    return 1
+  fi
+  stale="$DATA_DIR/.app.lock.guard.stale.$$"
+  rm -rf "$stale" 2>/dev/null || true
+  mv "$LOCK_GUARD" "$stale" 2>/dev/null || return 1
+  moved=$(lock_pid_from "$stale")
+  if [ "$moved" != "$observed" ]; then
+    [ -e "$LOCK_GUARD" ] || mv "$stale" "$LOCK_GUARD" 2>/dev/null || true
+    return 1
+  fi
+  rm -rf "$stale" 2>/dev/null || return 1
+  publish_guard
+}
+
 release_lock() {
-  [ "$lock_owned" = 1 ] || return 0
+  [ "$lock_owned" = 1 ] || [ "$lock_created" = 1 ] || return 0
   owner=$(lock_pid_from "$LOCK_DIR")
-  if [ "$owner" = "$$" ]; then
+  if [ "$owner" = "$$" ] ||
+     { [ "$lock_created" = 1 ] && [ "$guard_owned" = 1 ]; }; then
     rm -f "$LOCK_DIR/pid" 2>/dev/null || true
     rmdir "$LOCK_DIR" 2>/dev/null || true
   fi
   lock_owned=0
+  lock_created=0
 }
 
 acquire_lock() {
@@ -106,32 +121,22 @@ acquire_lock() {
     release_guard
     return 1
   }
-  if ! mkdir "$LOCK_DIR" 2>/dev/null ||
-     ! printf '%s\n' "$$" >"$LOCK_DIR/pid"; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  lock_created=1
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    lock_created=0
+    release_guard
+    return 1
+  fi
+  if ! printf '%s\n' "$$" >"$LOCK_DIR/pid"; then
+    release_lock
     release_guard
     return 1
   fi
   lock_owned=1
+  lock_created=0
   release_guard
   return 0
 }
-
-if ! acquire_lock; then
-  printf '%s\n' "MTG Commander Life Counter is already running." >>"$LOG_FILE" 2>/dev/null
-  exit 1
-fi
-
-chmod +x "$BIN" 2>/dev/null || true
-if [ ! -x "$BIN" ]; then
-  printf '%s\n' "Missing executable: $BIN" >>"$LOG_FILE" 2>/dev/null
-  release_lock
-  exit 1
-fi
-
-if [ -f "$LOG_FILE" ] && [ "$(wc -c <"$LOG_FILE" 2>/dev/null || printf 0)" -gt 131072 ]; then
-  mv "$LOG_FILE" "$LOG_FILE.old" 2>/dev/null || true
-fi
 
 child_group_alive() {
   [ -n "$child_pid" ] && kill -0 "-$child_pid" 2>/dev/null
@@ -161,23 +166,72 @@ terminate_child() {
 
 restore() {
   status=$?
-  trap - EXIT HUP INT TERM
+  trap '' HUP INT TERM
+  trap - EXIT
   terminate_child
   release_lock
   release_guard
   exit "$status"
 }
 
+shutdown_signal() {
+  shutdown_status=$1
+  if [ "$guard_critical" = 1 ] || [ "$child_spawn_critical" = 1 ]; then
+    if [ "$deferred_shutdown" = 0 ]; then
+      deferred_shutdown=$shutdown_status
+    fi
+    return 0
+  fi
+  trap '' HUP INT TERM
+  exit "$shutdown_status"
+}
+
+finish_guard_critical() {
+  guard_critical=0
+  if [ "$deferred_shutdown" != 0 ]; then
+    shutdown_status=$deferred_shutdown
+    deferred_shutdown=0
+    shutdown_signal "$shutdown_status"
+  fi
+}
+
+finish_child_spawn_critical() {
+  child_spawn_critical=0
+  if [ "$deferred_shutdown" != 0 ]; then
+    shutdown_status=$deferred_shutdown
+    deferred_shutdown=0
+    shutdown_signal "$shutdown_status"
+  fi
+}
+
 trap restore EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'shutdown_signal 129' HUP
+trap 'shutdown_signal 130' INT
+trap 'shutdown_signal 143' TERM
+
+if ! acquire_lock; then
+  printf '%s\n' "MTG Commander Life Counter is already running." >>"$LOG_FILE" 2>/dev/null
+  exit 1
+fi
+
+chmod +x "$BIN" 2>/dev/null || true
+if [ ! -x "$BIN" ]; then
+  printf '%s\n' "Missing executable: $BIN" >>"$LOG_FILE" 2>/dev/null
+  release_lock
+  exit 1
+fi
+
+if [ -f "$LOG_FILE" ] && [ "$(wc -c <"$LOG_FILE" 2>/dev/null || printf 0)" -gt 131072 ]; then
+  mv "$LOG_FILE" "$LOG_FILE.old" 2>/dev/null || true
+fi
 
 export DISPLAY=:0
 printf '%s launching native commander life counter\n' \
   "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_FILE" 2>&1
+child_spawn_critical=1
 "$BIN" "$STATE_FILE" >>"$LOG_FILE" 2>&1 &
 child_pid=$!
+finish_child_spawn_critical
 wait "$child_pid"
 status=$?
 child_reaped=1

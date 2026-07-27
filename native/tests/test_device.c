@@ -31,6 +31,9 @@ typedef struct {
     bool power_sleeping_after_flip;
     int write_attempts;
     int writes;
+    bool idle_timeout_pulse_available;
+    int idle_timeout_pulse_attempts;
+    int idle_timeout_pulses;
 } FakeDevice;
 
 static bool fake_read(void *context, const char *property, int *value) {
@@ -77,15 +80,53 @@ static bool fake_read_sleeping(void *context, bool *sleeping) {
     return true;
 }
 
+static bool fake_pulse_idle_timeout(void *context) {
+    FakeDevice *device = context;
+    ++device->idle_timeout_pulse_attempts;
+    if (!device->idle_timeout_pulse_available) return false;
+    ++device->idle_timeout_pulses;
+    return true;
+}
+
 static DeviceBackend fake_backend(FakeDevice *device) {
     DeviceBackend backend = {
         .context = device,
         .read_int = fake_read,
         .write_int = fake_write,
         .read_sleeping = fake_read_sleeping,
+        .pulse_idle_timeout = fake_pulse_idle_timeout,
     };
     return backend;
 }
+
+static void test_idle_timeout_pulse_applies_only_while_active(void) {
+    FakeDevice fake = {
+        .power_state_available = true,
+        .power_sleeping = false,
+        .idle_timeout_pulse_available = true,
+    };
+    DeviceBackend backend = fake_backend(&fake);
+
+    assert(device_idle_timeout_pulse(&backend) == DEVICE_IDLE_TIMEOUT_APPLIED);
+    assert(fake.idle_timeout_pulse_attempts == 1);
+    assert(fake.idle_timeout_pulses == 1);
+
+    fake.power_sleeping = true;
+    assert(device_idle_timeout_pulse(&backend) == DEVICE_IDLE_TIMEOUT_SKIPPED);
+    assert(fake.idle_timeout_pulse_attempts == 1);
+
+    fake.power_state_available = false;
+    assert(device_idle_timeout_pulse(&backend) == DEVICE_IDLE_TIMEOUT_FAILED);
+    assert(fake.idle_timeout_pulse_attempts == 1);
+
+    fake.power_state_available = true;
+    fake.power_sleeping = false;
+    fake.idle_timeout_pulse_available = false;
+    assert(device_idle_timeout_pulse(&backend) == DEVICE_IDLE_TIMEOUT_FAILED);
+    assert(fake.idle_timeout_pulse_attempts == 2);
+    assert(fake.idle_timeout_pulses == 1);
+}
+
 
 static void create_script(char *path, const char *body) {
     int descriptor = mkstemp(path);
@@ -569,6 +610,102 @@ static void test_command_backend_reads_power_state_strictly(void) {
     assert(unlink(script) == 0);
 }
 
+static void test_command_backend_pulses_exact_integer_timeout_event(void) {
+    char getter[] = "/tmp/mtg-device-pulse-get-XXXXXX";
+    char setter[] = "/tmp/mtg-device-pulse-set-XXXXXX";
+    char marker[] = "/tmp/mtg-device-pulse-args-XXXXXX";
+    create_script(getter, "printf 'active\\n'\n");
+    create_script(setter,
+                  "printf '%s\\n' \"$*\" >\"$MTG_TEST_PULSE_ARGS\"\n");
+    int marker_fd = mkstemp(marker);
+    assert(marker_fd >= 0);
+    assert(close(marker_fd) == 0);
+    assert(setenv("MTG_TEST_PULSE_ARGS", marker, 1) == 0);
+    DeviceCommandConfig config = {
+        .get_program = getter,
+        .set_program = setter,
+        .timeout_ms = 500,
+    };
+    DeviceBackend backend = device_command_backend(&config);
+
+    assert(device_idle_timeout_pulse(&backend) == DEVICE_IDLE_TIMEOUT_APPLIED);
+    FILE *file = fopen(marker, "r");
+    assert(file);
+    char arguments[128];
+    assert(fgets(arguments, sizeof(arguments), file));
+    assert(fclose(file) == 0);
+    assert(strcmp(arguments,
+                  "-i com.lab126.powerd touchScreenSaverTimeout 1\n") == 0);
+
+    assert(unsetenv("MTG_TEST_PULSE_ARGS") == 0);
+    assert(unlink(marker) == 0);
+    assert(unlink(setter) == 0);
+    assert(unlink(getter) == 0);
+}
+
+static void test_command_backend_pulse_requires_exact_known_power_state(void) {
+    const char *states[] = {
+        "active", "  active  ", "screenSaver", "readyToSuspend",
+        "suspended", "unknown", "active junk",
+    };
+    const DeviceIdleTimeoutResult expected[] = {
+        DEVICE_IDLE_TIMEOUT_APPLIED, DEVICE_IDLE_TIMEOUT_APPLIED,
+        DEVICE_IDLE_TIMEOUT_SKIPPED, DEVICE_IDLE_TIMEOUT_SKIPPED,
+        DEVICE_IDLE_TIMEOUT_SKIPPED, DEVICE_IDLE_TIMEOUT_FAILED,
+        DEVICE_IDLE_TIMEOUT_FAILED,
+    };
+    for (size_t index = 0; index < sizeof(states) / sizeof(states[0]); ++index) {
+        char getter[] = "/tmp/mtg-device-pulse-state-XXXXXX";
+        char setter[] = "/tmp/mtg-device-pulse-state-set-XXXXXX";
+        char marker[] = "/tmp/mtg-device-pulse-state-marker-XXXXXX";
+        char body[128];
+        assert(snprintf(body, sizeof(body), "printf '%%s\\n' '%s'\n",
+                        states[index]) > 0);
+        create_script(getter, body);
+        create_script(setter, ": >\"$MTG_TEST_PULSE_STATE_MARKER\"\n");
+        int marker_fd = mkstemp(marker);
+        assert(marker_fd >= 0);
+        assert(close(marker_fd) == 0);
+        assert(unlink(marker) == 0);
+        assert(setenv("MTG_TEST_PULSE_STATE_MARKER", marker, 1) == 0);
+        DeviceCommandConfig config = {
+            .get_program = getter,
+            .set_program = setter,
+            .timeout_ms = 500,
+        };
+        DeviceBackend backend = device_command_backend(&config);
+
+        assert(device_idle_timeout_pulse(&backend) == expected[index]);
+        assert((access(marker, F_OK) == 0) ==
+               (expected[index] == DEVICE_IDLE_TIMEOUT_APPLIED));
+
+        assert(unsetenv("MTG_TEST_PULSE_STATE_MARKER") == 0);
+        if (access(marker, F_OK) == 0) assert(unlink(marker) == 0);
+        assert(unlink(setter) == 0);
+        assert(unlink(getter) == 0);
+    }
+}
+
+static void test_command_backend_bounds_hanging_idle_timeout_pulse(void) {
+    char getter[] = "/tmp/mtg-device-pulse-hang-get-XXXXXX";
+    char setter[] = "/tmp/mtg-device-pulse-hang-set-XXXXXX";
+    create_script(getter, "printf 'active\\n'\n");
+    create_script(setter, "exec /bin/sleep 5\n");
+    DeviceCommandConfig config = {
+        .get_program = getter,
+        .set_program = setter,
+        .timeout_ms = 100,
+    };
+    DeviceBackend backend = device_command_backend(&config);
+
+    double started = monotonic_seconds();
+    assert(device_idle_timeout_pulse(&backend) == DEVICE_IDLE_TIMEOUT_FAILED);
+    assert(monotonic_seconds() - started < 1.0);
+
+    assert(unlink(setter) == 0);
+    assert(unlink(getter) == 0);
+}
+
 static void test_power_transitions_require_readback_confirmation(void) {
     FakeDevice fake = {
         .light = 18,
@@ -804,6 +941,9 @@ int main(int argc, char **argv) {
     test_wake_rechecks_physical_state_before_settling();
     test_sleep_and_exit_do_not_trust_stale_off_status();
     test_command_backend_reads_power_state_strictly();
+    test_command_backend_pulses_exact_integer_timeout_event();
+    test_command_backend_pulse_requires_exact_known_power_state();
+    test_command_backend_bounds_hanging_idle_timeout_pulse();
     test_power_transitions_require_readback_confirmation();
     test_command_backend_rejects_oversized_output();
     test_command_backend_reads_strict_integer_output();
@@ -811,6 +951,7 @@ int main(int argc, char **argv) {
     test_command_backend_kills_descendants_on_timeout();
     test_command_backend_kills_descendants_after_success();
     test_command_backend_bounds_hanging_reads_and_writes();
+    test_idle_timeout_pulse_applies_only_while_active();
     puts("PASS device adapter");
     return 0;
 }

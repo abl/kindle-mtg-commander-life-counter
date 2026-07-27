@@ -2,7 +2,7 @@
 set -eu
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-VERSION=${1:-2.0.0}
+VERSION=${1:-2.1.0}
 SOURCE="$ROOT_DIR/extensions/mtg-life-counter"
 DIST_DIR="$ROOT_DIR/dist"
 ARCHIVE="$DIST_DIR/mtg-life-counter-v${VERSION}-kindle.zip"
