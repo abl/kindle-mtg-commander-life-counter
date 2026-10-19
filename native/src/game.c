@@ -40,6 +40,14 @@ bool game_evaluate_elimination_after_mutation(GameState *game, int player) {
     return true;
 }
 
+bool game_revive(GameState *game, int player) {
+    if (!game || !valid_player(player) || !game->eliminated[player]) return false;
+    if (game->poison[player] == 10) game->poison[player] = 9;
+    if (game->life[player] <= 0) game->life[player] = 1;
+    game->eliminated[player] = false;
+    return true;
+}
+
 void game_adjust(GameState *game, int player, int delta) {
     if (!valid_player(player)) return;
     if (delta > 0 && game->life[player] > INT_MAX - delta) return;
@@ -85,6 +93,9 @@ bool game_apply_tap(GameState *game, GameControl control) {
         if (game->monarch_player == control.player) return false;
         game->monarch_player = control.player;
         return true;
+    }
+    if (control.type == GAME_CONTROL_REVIVE) {
+        return game_revive(game, control.player);
     }
     return false;
 }
@@ -281,7 +292,7 @@ bool game_load(GameState *game, const char *path) {
         if (!parse_line(line, key, sizeof(key), &value)) {
             valid = false;
         } else if (strcmp(key, "VERSION") == 0 && !version_seen &&
-                   (value == 2 || value == 3)) {
+                   (value == 2 || value == 3 || value == 4)) {
             version_seen = true;
             version = value;
         } else if (key[0] == 'P' && key[1] >= '1' && key[1] <= '4' &&
@@ -330,6 +341,12 @@ bool game_load(GameState *game, const char *path) {
                    value >= 0 && value <= GAME_PLAYER_COUNT) {
             loaded.monarch_player = value - 1;
             monarch_seen = true;
+        } else if ((strcmp(key, "INITIATIVE") == 0 &&
+                    value >= 0 && value <= GAME_PLAYER_COUNT) ||
+                   (key[0] == 'U' && key[1] == 'C' &&
+                    key[2] >= '1' && key[2] <= '4' && key[3] == '\0' &&
+                    value >= 0 && value <= 8)) {
+            /* Saved by the removed initiative tracker. Keep the rest of the game. */
         } else {
             valid = false;
         }

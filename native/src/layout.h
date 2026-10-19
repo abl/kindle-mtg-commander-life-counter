@@ -32,6 +32,7 @@ typedef struct {
     GameRect life_plus[GAME_PLAYER_COUNT];
     GameRect life_minus_visual[GAME_PLAYER_COUNT];
     GameRect life_plus_visual[GAME_PLAYER_COUNT];
+    GameRect revive[GAME_PLAYER_COUNT];
     GameRect first_triangle[GAME_PLAYER_COUNT][2];
     double marker_margin_x[GAME_PLAYER_COUNT];
 } GameLayout;

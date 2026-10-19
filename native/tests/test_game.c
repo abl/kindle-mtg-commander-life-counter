@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -115,6 +116,56 @@ static void test_life_threshold_eliminates_and_manual_restore_waits_for_mutation
     assert(game_apply_tap(&game, poison));
     assert(game_evaluate_elimination_after_mutation(&game, 0));
     assert(game.eliminated[0]);
+}
+
+static void test_revive_removes_threshold_poison_and_restores_nonpositive_life(void) {
+    GameState game;
+    game_reset(&game);
+    game.life[0] = 0;
+    game.poison[0] = 10;
+    game.eliminated[0] = true;
+    game.life[1] = -4;
+    game.poison[1] = 3;
+    game.eliminated[1] = true;
+    game.life[2] = 12;
+    game.poison[2] = 10;
+    game.eliminated[2] = true;
+    game.life[3] = 8;
+    game.poison[3] = 11;
+    game.commander_damage[3][0] = 21;
+    game.eliminated[3] = true;
+
+    GameControl revive = {
+        .type = GAME_CONTROL_REVIVE,
+        .player = 0,
+        .source = GAME_NO_PLAYER,
+        .delta = 0,
+    };
+    assert(game_apply_tap(&game, revive));
+    assert(game.life[0] == 1);
+    assert(game.poison[0] == 9);
+    assert(!game.eliminated[0]);
+    assert(!game_apply_tap(&game, revive));
+
+    revive.player = 1;
+    assert(game_revive(&game, 1));
+    assert(game.life[1] == 1);
+    assert(game.poison[1] == 3);
+    assert(!game.eliminated[1]);
+
+    revive.player = 2;
+    assert(game_revive(&game, 2));
+    assert(game.life[2] == 12);
+    assert(game.poison[2] == 9);
+    assert(!game.eliminated[2]);
+
+    revive.player = 3;
+    assert(game_revive(&game, 3));
+    assert(game.life[3] == 8);
+    assert(game.poison[3] == 11);
+    assert(game.commander_damage[3][0] == 21);
+    assert(!game.eliminated[3]);
+    assert(!game_revive(&game, 3));
 }
 
 static void test_poison_and_single_commander_thresholds_eliminate(void) {
@@ -724,6 +775,7 @@ int main(void) {
     test_reset_clears_v2_trackers();
     test_reset_and_manual_player_state_hold_preserve_underlying_game();
     test_life_threshold_eliminates_and_manual_restore_waits_for_mutation();
+    test_revive_removes_threshold_poison_and_restores_nonpositive_life();
     test_poison_and_single_commander_thresholds_eliminate();
     test_provisional_threshold_taps_do_not_poison_final_hold_state();
     test_zero_clear_holds_are_not_final_mutations();

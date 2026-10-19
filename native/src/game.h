@@ -18,6 +18,7 @@ typedef enum {
     GAME_CONTROL_POISON,
     GAME_CONTROL_MONARCH,
     GAME_CONTROL_PLAYER_STATE,
+    GAME_CONTROL_REVIVE,
 } GameControlType;
 
 typedef struct {
@@ -53,6 +54,7 @@ bool game_control_changed_from_snapshot(const GameState *game,
                                         const GameState *before,
                                         GameControl control);
 bool game_evaluate_elimination_after_mutation(GameState *game, int player);
+bool game_revive(GameState *game, int player);
 bool game_control_equal(GameControl left, GameControl right);
 void game_life_preview_reset(GameLifePreview *preview);
 bool game_life_preview_record(GameLifePreview *preview, int player,

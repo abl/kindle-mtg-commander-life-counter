@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>MTG Commander Life Counter — Kindle Preview</title>
 <style>
-  :root { --ink:#111; --paper:#f4f1e8; --muted:#cecac0; }
+  :root { --ink:#111; --paper:#f4f1e8; --muted:#cecac0; --p1:#e7b3ad; --p2:#b9c8f5; --p3:#b7dcc2; --p4:#f0d392; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html,body { margin:0; width:100%; min-height:100%; background:#292929; color:var(--ink); font-family:"Arial Narrow","Helvetica Neue",Arial,sans-serif; }
   body { display:grid; place-items:center; padding:18px; }
@@ -23,6 +23,10 @@
   }
   .board { display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; width:100%; height:100%; }
   .player { position:relative; overflow:hidden; border:2px solid #111; background:var(--paper); container-type:size; }
+  .p1 { background:var(--p1); }
+  .p2 { background:var(--p2); }
+  .p3 { background:var(--p3); }
+  .p4 { background:var(--p4); }
   .player::before { content:""; position:absolute; inset:0; pointer-events:none; opacity:.14; }
   .player[data-player="1"]::before { background:repeating-linear-gradient(135deg,#000 0 2px,transparent 2px 24px); }
   .player[data-player="2"]::before { background:radial-gradient(circle at center,#000 0 1.5px,transparent 2px); background-size:22px 22px; }

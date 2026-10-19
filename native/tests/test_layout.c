@@ -238,6 +238,26 @@ static void test_state_aware_hit_testing_blocks_eliminated_panels(void) {
     assert(!game_layout_hit_test_for_state(
         &layout, &game, center_x(layout.toolbar_item[1]),
         center_y(layout.toolbar_item[1]), &control));
+
+    for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
+        game.eliminated[player] = false;
+        GameRect revive = layout.revive[player];
+        assert(game_rect_contains(layout.panel[player], center_x(revive),
+                                  center_y(revive)));
+        assert(game_layout_hit_test_for_state(
+            &layout, &game, center_x(revive), center_y(revive), &control));
+        assert(control.type != GAME_CONTROL_REVIVE);
+        game.eliminated[player] = true;
+        assert(game_layout_hit_test_for_state(
+            &layout, &game, center_x(revive), center_y(revive), &control));
+        assert(control.type == GAME_CONTROL_REVIVE);
+        assert(control.player == player);
+        assert(game_layout_hit_test_for_state(
+            &layout, &game, center_x(layout.panel[player]),
+            center_y(layout.panel[player]), &control));
+        assert(control.type == GAME_CONTROL_PLAYER_STATE);
+        game.eliminated[player] = false;
+    }
 }
 
 static void test_hold_state_promotes_once_and_swallows_late_duplicates(void) {

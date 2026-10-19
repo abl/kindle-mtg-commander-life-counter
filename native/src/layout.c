@@ -127,6 +127,25 @@ void game_layout_init(GameLayout *layout, double width, double height) {
             name_x, panel.y + panel.height * 0.34, triangle_size);
         layout->first_triangle[player][1] = centered_rect(
             name_x, panel.y + panel.height * 0.66, triangle_size);
+
+        const double local_width = panel.height;
+        const double local_height = panel.width;
+        const double button_span = local_width * 0.62;
+        const double button_thickness = local_height * 0.16;
+        const double button_offset = local_height * 0.30;
+        const double center_x = panel.x + panel.width / 2.0;
+        const double center_y = panel.y + panel.height / 2.0;
+        if (clockwise) {
+            layout->revive[player] = rect(
+                center_x - (button_offset + button_thickness),
+                center_y - button_span / 2.0,
+                button_thickness, button_span);
+        } else {
+            layout->revive[player] = rect(
+                center_x + button_offset,
+                center_y - button_span / 2.0,
+                button_thickness, button_span);
+        }
     }
 }
 
@@ -188,8 +207,13 @@ bool game_layout_hit_test_for_state(const GameLayout *layout,
     *control = make_control(GAME_CONTROL_NONE, GAME_NO_PLAYER,
                             GAME_NO_PLAYER, 0);
     for (int player = 0; player < GAME_PLAYER_COUNT; ++player) {
-        if (game->eliminated[player] &&
-            game_rect_contains(layout->panel[player], x, y)) {
+        if (!game->eliminated[player]) continue;
+        if (game_rect_contains(layout->revive[player], x, y)) {
+            *control = make_control(GAME_CONTROL_REVIVE, player,
+                                    GAME_NO_PLAYER, 0);
+            return true;
+        }
+        if (game_rect_contains(layout->panel[player], x, y)) {
             *control = make_control(GAME_CONTROL_PLAYER_STATE, player,
                                     GAME_NO_PLAYER, 0);
             return true;
