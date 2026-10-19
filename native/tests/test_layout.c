@@ -195,6 +195,12 @@ static void test_name_and_preview_geometry_is_player_local(void) {
         }
         assert(near(center_y(name), center_y(panel)));
         assert(near(center_y(preview), center_y(panel)));
+        assert(near(center_x(layout.monarch[player]), center_x(name)));
+        if (right) {
+            assert(near(name.x, panel.x));
+        } else {
+            assert(near(name.x + name.width, panel.x + panel.width));
+        }
     }
 }
 

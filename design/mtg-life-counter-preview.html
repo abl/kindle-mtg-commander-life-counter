@@ -40,15 +40,19 @@
   .p1 .player-core,.p4 .player-core { left:4%; right:-4%; transform:rotate(90deg); }
   .p2 .player-core,.p3 .player-core { left:-4%; right:4%; transform:rotate(-90deg); }
   .life { font-family:Impact,"Arial Black",sans-serif; font-size:62cqw; font-weight:900; line-height:.8; letter-spacing:-.06em; font-variant-numeric:tabular-nums; }
-  .player-name { position:absolute; top:50%; z-index:4; display:flex; align-items:center; justify-content:center; width:27cqh; height:2.4em; text-align:center; font-size:5.1cqw; font-weight:950; letter-spacing:.1em; text-transform:uppercase; white-space:nowrap; pointer-events:none; }
-  .p1 .player-name,.p4 .player-name { margin-right:1.1em; }
-  .p2 .player-name,.p3 .player-name { margin-left:1.1em; }
-  .p1 .player-name { background:var(--p1); }
-  .p2 .player-name { background:var(--p2); }
-  .p3 .player-name { background:var(--p3); }
-  .p4 .player-name { background:var(--p4); }
-  .p1 .player-name,.p4 .player-name { right:-4%; transform:translateY(-50%) rotate(90deg); }
-  .p2 .player-name,.p3 .player-name { left:-4%; transform:translateY(-50%) rotate(-90deg); }
+  .seat-bar { position:absolute; z-index:4; display:flex; align-items:center; justify-content:center; top:19%; bottom:19%; pointer-events:none; }
+  .p1 .seat-bar,.p4 .seat-bar { right:0; width:14%; }
+  .p2 .seat-bar,.p3 .seat-bar { left:0; width:14%; }
+  .p1 .seat-bar { background:var(--p1); }
+  .p2 .seat-bar { background:var(--p2); }
+  .p3 .seat-bar { background:var(--p3); }
+  .p4 .seat-bar { background:var(--p4); }
+  .player-name { font-size:5.1cqw; font-weight:950; letter-spacing:.1em; text-transform:uppercase; white-space:nowrap; }
+  .p1 .player-name,.p4 .player-name { transform:rotate(90deg); }
+  .p2 .player-name,.p3 .player-name { transform:rotate(-90deg); }
+  .life-change { position:absolute; z-index:5; top:50%; font-size:4.6cqw; font-weight:950; transform:translateY(-50%); pointer-events:none; }
+  .p1 .life-change,.p4 .life-change { right:20%; transform:translateY(-50%) rotate(90deg); }
+  .p2 .life-change,.p3 .life-change { left:20%; transform:translateY(-50%) rotate(-90deg); }
 
   .monarch {
     position:absolute; z-index:4; width:15cqw; height:15cqw; padding:0; border:0; background:transparent; cursor:pointer;
@@ -60,10 +64,10 @@
   .p3 .monarch.active path { fill:var(--p3); }
   .p4 .monarch.active path { fill:var(--p4); }
   .monarch:active { opacity:.45; }
-  .p1 .monarch { top:8%; right:2%; transform:rotate(90deg); }
-  .p2 .monarch { top:8%; left:2%; transform:rotate(-90deg); }
-  .p3 .monarch { bottom:8%; left:2%; transform:rotate(-90deg); }
-  .p4 .monarch { bottom:8%; right:2%; transform:rotate(90deg); }
+  .p1 .monarch { top:8%; right:calc(7% - 7.5cqw); transform:rotate(90deg); }
+  .p2 .monarch { top:8%; left:calc(7% - 7.5cqw); transform:rotate(-90deg); }
+  .p3 .monarch { bottom:8%; left:calc(7% - 7.5cqw); transform:rotate(-90deg); }
+  .p4 .monarch { bottom:8%; right:calc(7% - 7.5cqw); transform:rotate(90deg); }
 
   .first-indicator {
     position:absolute; z-index:4; display:none; align-items:center; gap:2.2cqw; padding:1.4cqw 1cqw; background:rgba(244,241,232,.94); font-weight:950; text-transform:uppercase; letter-spacing:.05em; pointer-events:none;
@@ -103,7 +107,8 @@
       <button class="tap-zone minus" data-delta="-1" aria-label="Player 1 lose one life"></button>
       <button class="tap-zone plus" data-delta="1" aria-label="Player 1 gain one life"></button>
       <div class="player-core"><strong class="life">40</strong></div>
-      <span class="player-name">Player 1</span>
+      <span class="life-change">+2</span>
+      <div class="seat-bar"><span class="player-name">Player 1</span></div>
       <button class="monarch" aria-label="Toggle Player 1 monarch">
         <svg viewBox="0 0 72 58" aria-hidden="true"><path d="M8 49V19l17 14L36 7l11 26 17-14v30z"/></svg>
       </button>
@@ -113,8 +118,9 @@
       <button class="tap-zone minus" data-delta="-1" aria-label="Player 2 lose one life"></button>
       <button class="tap-zone plus" data-delta="1" aria-label="Player 2 gain one life"></button>
       <div class="player-core"><strong class="life">40</strong></div>
-      <span class="player-name">Player 2</span>
-      <button class="monarch" aria-label="Toggle Player 2 monarch">
+      <span class="life-change">−1</span>
+      <div class="seat-bar"><span class="player-name">Player 2</span></div>
+      <button class="monarch active" aria-label="Toggle Player 2 monarch">
         <svg viewBox="0 0 72 58" aria-hidden="true"><path d="M8 49V19l17 14L36 7l11 26 17-14v30z"/></svg>
       </button>
       <div class="first-indicator"><span class="word">First</span><span class="badge">1</span></div>
@@ -123,7 +129,8 @@
       <button class="tap-zone minus" data-delta="-1" aria-label="Player 4 lose one life"></button>
       <button class="tap-zone plus" data-delta="1" aria-label="Player 4 gain one life"></button>
       <div class="player-core"><strong class="life">40</strong></div>
-      <span class="player-name">Player 4</span>
+      <span class="life-change">+1</span>
+      <div class="seat-bar"><span class="player-name">Player 4</span></div>
       <button class="monarch" aria-label="Toggle Player 4 monarch">
         <svg viewBox="0 0 72 58" aria-hidden="true"><path d="M8 49V19l17 14L36 7l11 26 17-14v30z"/></svg>
       </button>
@@ -133,7 +140,8 @@
       <button class="tap-zone minus" data-delta="-1" aria-label="Player 3 lose one life"></button>
       <button class="tap-zone plus" data-delta="1" aria-label="Player 3 gain one life"></button>
       <div class="player-core"><strong class="life">40</strong></div>
-      <span class="player-name">Player 3</span>
+      <span class="life-change">−3</span>
+      <div class="seat-bar"><span class="player-name">Player 3</span></div>
       <button class="monarch" aria-label="Toggle Player 3 monarch">
         <svg viewBox="0 0 72 58" aria-hidden="true"><path d="M8 49V19l17 14L36 7l11 26 17-14v30z"/></svg>
       </button>

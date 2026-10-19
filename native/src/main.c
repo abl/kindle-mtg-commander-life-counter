@@ -71,6 +71,10 @@ typedef struct {
     gboolean exit_failed;
     gboolean pending_loss_check;
     int pending_loss_player;
+    gboolean commander_tap_pending;
+    gint64 hold_started_us;
+    GThread *hold_wakeup_thread;
+    gint hold_wakeup_run;
 } App;
 
 static volatile sig_atomic_t termination_signal;
@@ -409,11 +413,8 @@ static void draw_player(cairo_t *cr, const App *app, int player) {
     draw_poison_marker(cr, app, player);
 
     GameRect crown = app->layout.monarch[player];
-    const gboolean right = player == 1 || player == 2;
     const double crown_size = minimum(crown.width, crown.height) * 0.56;
-    const double crown_center_x = app->layout.marker_margin_x[player] +
-        (right ? crown_size / 2.0 : -crown_size / 2.0);
-    draw_crown(cr, crown_center_x,
+    draw_crown(cr, crown.x + crown.width / 2.0,
                crown.y + crown.height / 2.0,
                crown_size,
                app->game.monarch_player == player, angle, player);
@@ -740,6 +741,11 @@ static void finish_game_mutation(App *app, GameControl control,
     } else {
         queue_player(app, control.player);
     }
+    GdkWindow *window = gtk_widget_get_window(app->canvas);
+    if (window) {
+        gdk_window_process_updates(window, TRUE);
+        gdk_flush();
+    }
 }
 
 static void finalize_pending_loss_check(App *app) {
@@ -762,13 +768,55 @@ static void cancel_hold_timer(App *app) {
     app->long_press_timer = 0;
 }
 
+static gpointer hold_wakeup_thread(gpointer data) {
+    App *app = data;
+    for (;;) {
+        g_usleep(40 * 1000);
+        if (g_atomic_int_get(&app->hold_wakeup_run)) {
+            g_main_context_wakeup(NULL);
+        }
+    }
+    return NULL;
+}
+
+static void stop_hold_wakeup(App *app) {
+    g_atomic_int_set(&app->hold_wakeup_run, 0);
+}
+
+static void start_hold_wakeup(App *app) {
+    g_atomic_int_set(&app->hold_wakeup_run, 1);
+    if (app->hold_wakeup_thread) return;
+    app->hold_wakeup_thread = g_thread_create(hold_wakeup_thread, app,
+                                              FALSE, NULL);
+}
+
+static void commit_pending_commander_tap(App *app) {
+    if (!app->commander_tap_pending || app->hold.promoted) {
+        app->commander_tap_pending = FALSE;
+        return;
+    }
+    app->commander_tap_pending = FALSE;
+    GameControl tap = app->hold.control;
+    if (tap.type != GAME_CONTROL_COMMANDER) return;
+    int life_before = app->game.life[tap.player];
+    if (!game_apply_tap(&app->game, tap)) return;
+    finish_game_mutation(app, tap, life_before, TRUE);
+}
+
 static void cancel_hold(App *app) {
+    commit_pending_commander_tap(app);
     finalize_pending_loss_check(app);
     cancel_hold_timer(app);
+    stop_hold_wakeup(app);
     game_hold_reset(&app->hold);
     app->hold_tap_applied = FALSE;
     app->hold_tap_control = (GameControl){
         GAME_CONTROL_NONE, GAME_NO_PLAYER, GAME_NO_PLAYER, 0};
+}
+
+static gboolean commander_hold_in_progress(const App *app) {
+    return app->hold.active && !app->hold.promoted &&
+           app->hold.control.type == GAME_CONTROL_COMMANDER;
 }
 
 static gboolean start_power_watch(App *app);
@@ -1187,6 +1235,9 @@ static void restore_name_tap_from_snapshot(App *app) {
 static void apply_hold_promotion(App *app) {
     if (!app->hold.active) return;
     GameControl control = app->hold.control;
+    if (control.type == GAME_CONTROL_COMMANDER) {
+        app->commander_tap_pending = FALSE;
+    }
     int life_before = app->game.life[control.player];
     if (control.type == GAME_CONTROL_PLAYER_STATE &&
         !app->hold_before.eliminated[control.player]) {
@@ -1203,9 +1254,29 @@ static void apply_hold_promotion(App *app) {
     }
 }
 
+static gboolean hold_is_due(const App *app) {
+    return app->hold.active && !app->hold.promoted &&
+           g_get_monotonic_time() - app->hold_started_us >=
+               (gint64)LONG_PRESS_DELAY_MS * 1000;
+}
+
+static void promote_hold_if_due(App *app) {
+    if (!hold_is_due(app)) return;
+    cancel_hold_timer(app);
+    stop_hold_wakeup(app);
+    if (game_hold_timeout(&app->hold)) apply_hold_promotion(app);
+}
+
 static gboolean on_long_press(gpointer data) {
     App *app = data;
+    if (!app->hold.active || app->hold.promoted) {
+        app->long_press_timer = 0;
+        stop_hold_wakeup(app);
+        return FALSE;
+    }
+    if (!hold_is_due(app)) return TRUE;
     app->long_press_timer = 0;
+    stop_hold_wakeup(app);
     if (game_hold_timeout(&app->hold)) apply_hold_promotion(app);
     return FALSE;
 }
@@ -1299,6 +1370,7 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event,
     }
 
     if (app->hold.active && app->hold.promoted) return TRUE;
+    if (commander_hold_in_progress(app)) return TRUE;
 
     for (int item = 0; item < 3; ++item) {
         if (!game_rect_contains(app->layout.toolbar_item[item],
@@ -1346,9 +1418,11 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event,
         app->hold_tap_applied = FALSE;
         app->hold_tap_control = (GameControl){
             GAME_CONTROL_NONE, GAME_NO_PLAYER, GAME_NO_PLAYER, 0};
+        app->hold_started_us = g_get_monotonic_time();
         cancel_hold_timer(app);
-        app->long_press_timer = g_timeout_add(LONG_PRESS_DELAY_MS,
-                                              on_long_press, app);
+        app->long_press_timer = g_timeout_add_full(G_PRIORITY_HIGH, 40,
+                                                   on_long_press, app, NULL);
+        start_hold_wakeup(app);
         GameControl tap_control = control;
         if (control.type == GAME_CONTROL_PLAYER_STATE &&
             !app->game.eliminated[control.player]) {
@@ -1358,7 +1432,10 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event,
                     GAME_CONTROL_NONE, GAME_NO_PLAYER, GAME_NO_PLAYER, 0};
             }
         }
-        if (tap_control.type != GAME_CONTROL_NONE) {
+        app->commander_tap_pending =
+            tap_control.type == GAME_CONTROL_COMMANDER;
+        if (tap_control.type != GAME_CONTROL_NONE &&
+            tap_control.type != GAME_CONTROL_COMMANDER) {
             int life_before = app->game.life[tap_control.player];
             if (game_apply_tap(&app->game, tap_control)) {
                 app->hold_tap_applied = TRUE;
@@ -1379,7 +1456,10 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event,
 static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event,
                                   gpointer data) {
     (void)widget;
-    if (event->button == 1) cancel_hold(data);
+    if (event->button == 1) {
+        promote_hold_if_due(data);
+        cancel_hold(data);
+    }
     return TRUE;
 }
 
@@ -1390,7 +1470,9 @@ static gboolean on_motion(GtkWidget *widget, GdkEventMotion *event,
         cancel_hold(app);
         return TRUE;
     }
-    if (!app->hold.active) return TRUE;
+    promote_hold_if_due(app);
+    if (!app->hold.active || app->hold.promoted ||
+        commander_hold_in_progress(app)) return TRUE;
     GtkAllocation allocation;
     gtk_widget_get_allocation(widget, &allocation);
     game_layout_init(&app->layout, allocation.width, allocation.height);
@@ -1407,6 +1489,7 @@ static gboolean on_leave(GtkWidget *widget, GdkEventCrossing *event,
     (void)widget;
     (void)event;
     App *app = data;
+    if (commander_hold_in_progress(app)) return TRUE;
     if (!app->hold.promoted) cancel_hold(app);
     return TRUE;
 }
@@ -1464,6 +1547,7 @@ int main(int argc, char **argv) {
     app.canvas = gtk_drawing_area_new();
     gtk_widget_add_events(app.canvas,
                           GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK |
+                          GDK_BUTTON_MOTION_MASK | GDK_BUTTON1_MOTION_MASK |
                           GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK);
     g_signal_connect(app.canvas, "expose-event", G_CALLBACK(on_expose), &app);
     g_signal_connect(app.canvas, "button-press-event",

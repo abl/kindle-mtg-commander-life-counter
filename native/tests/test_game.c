@@ -286,6 +286,29 @@ static void test_commander_damage_tap_tracks_source_and_life(void) {
     assert(game.life[3] == 40);
 }
 
+static void test_commander_hold_refunds_only_that_sources_damage(void) {
+    GameState game;
+    game_reset(&game);
+    game_adjust(&game, 0, -4);
+    assert(game_add_commander_damage(&game, 0, 1));
+    assert(game_add_commander_damage(&game, 0, 1));
+    assert(game_add_commander_damage(&game, 0, 2));
+    assert(game.life[0] == 33);
+
+    GameControl commander = {
+        .type = GAME_CONTROL_COMMANDER,
+        .player = 0,
+        .source = 1,
+        .delta = 0,
+    };
+    GameState before = game;
+    assert(game_apply_tap(&game, commander));
+    assert(game_apply_hold_from_snapshot(&game, &before, commander));
+    assert(game.commander_damage[0][1] == 0);
+    assert(game.commander_damage[0][2] == 1);
+    assert(game.life[0] == 35);
+}
+
 static void test_commander_damage_hold_clears_and_refunds_life(void) {
     GameState game;
     game_reset(&game);
@@ -780,6 +803,7 @@ int main(void) {
     test_provisional_threshold_taps_do_not_poison_final_hold_state();
     test_zero_clear_holds_are_not_final_mutations();
     test_commander_damage_tap_tracks_source_and_life();
+    test_commander_hold_refunds_only_that_sources_damage();
     test_commander_damage_hold_clears_and_refunds_life();
     test_commander_damage_actions_are_atomic_at_integer_limits();
     test_first_player_selection();
