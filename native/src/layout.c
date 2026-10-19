@@ -1,5 +1,6 @@
 #include "layout.h"
 
+#include <math.h>
 #include <string.h>
 
 static GameRect rect(double x, double y, double width, double height) {
@@ -69,7 +70,14 @@ void game_layout_init(GameLayout *layout, double width, double height) {
         }
 
         const bool bottom = player == 2 || player == 3;
-        const double marker_x = panel.x + panel.width * (right ? 0.16 : 0.84);
+        const double away = right ? -1.0 : 1.0;
+        const double marker_half = marker_size / 2.0;
+        double marker_frac = (right ? 0.16 : 0.84) + away * 0.06;
+        const double min_frac = marker_half / panel.width + 0.005;
+        const double max_frac = 1.0 - min_frac;
+        if (marker_frac < min_frac) marker_frac = min_frac;
+        if (marker_frac > max_frac) marker_frac = max_frac;
+        const double marker_x = panel.x + panel.width * marker_frac;
         const double poison_y = panel.y + panel.height * (bottom ? 0.88 : 0.12);
         const double monarch_y = panel.y + panel.height * (bottom ? 0.12 : 0.88);
         layout->poison[player] = centered_rect(marker_x, poison_y, marker_size);
@@ -111,22 +119,30 @@ void game_layout_init(GameLayout *layout, double width, double height) {
 
         const double triangle_size = panel_width * 0.065;
         const double name_x = panel.x + panel.width * (right ? 0.08 : 0.92);
-        layout->player_name[player] = rect(
-            name_x - panel.width * 0.07,
-            panel.y + panel.height * 0.19,
-            panel.width * 0.14, panel.height * 0.62);
+        const double text_half = panel.width * 0.07;
         const double life_center_x = content.x + content.width / 2.0;
+        const double preview_half = panel.width * 0.09;
         const double preview_center_x = (name_x + life_center_x) / 2.0;
+        const double gap = panel.width * 0.008;
+        const double away_edge = name_x + away * text_half;
+        const double life_edge = preview_center_x + away * (preview_half + gap);
+        const double bar_x = away_edge < life_edge ? away_edge : life_edge;
+        const double bar_width = fabs(away_edge - life_edge);
+        layout->player_name[player] = rect(
+            bar_x,
+            panel.y + panel.height * 0.19,
+            bar_width, panel.height * 0.62);
         layout->life_preview[player] = rect(
             preview_center_x - panel.width * 0.09,
             panel.y + panel.height * 0.39,
             panel.width * 0.18, panel.height * 0.22);
         layout->marker_margin_x[player] =
-            panel.x + panel.width * (right ? 0.05 : 0.95);
+            panel.x + panel.width * (right ? 0.01 : 0.99);
+        const double bar_center_x = bar_x + bar_width / 2.0;
         layout->first_triangle[player][0] = centered_rect(
-            name_x, panel.y + panel.height * 0.34, triangle_size);
+            bar_center_x, panel.y + panel.height * 0.34, triangle_size);
         layout->first_triangle[player][1] = centered_rect(
-            name_x, panel.y + panel.height * 0.66, triangle_size);
+            bar_center_x, panel.y + panel.height * 0.66, triangle_size);
 
         const double local_width = panel.height;
         const double local_height = panel.width;

@@ -111,15 +111,6 @@ static void set_player_color(cairo_t *cr, int player, double white_mix) {
         PLAYER_BLUE[player] + (1.0 - PLAYER_BLUE[player]) * white_mix);
 }
 
-static void set_player_shade(cairo_t *cr, int player, double black_mix) {
-    if (player < 0 || player >= GAME_PLAYER_COUNT) player = 0;
-    if (black_mix < 0.0) black_mix = 0.0;
-    if (black_mix > 1.0) black_mix = 1.0;
-    cairo_set_source_rgb(cr, PLAYER_RED[player] * (1.0 - black_mix),
-                         PLAYER_GREEN[player] * (1.0 - black_mix),
-                         PLAYER_BLUE[player] * (1.0 - black_mix));
-}
-
 static void draw_text(cairo_t *cr, const char *text, double x, double y,
                       double width, double height, double size,
                       gboolean centered) {
@@ -220,21 +211,13 @@ static void draw_skull(cairo_t *cr, double center_x, double center_y,
     cairo_line_to(cr, -size * 0.18, size * 0.30);
     cairo_line_to(cr, -size * 0.32, size * 0.12);
     cairo_close_path(cr);
-    if (filled) {
-        cairo_set_source_rgb(cr, 0.05, 0.42, 0.16);
-    } else {
-        cairo_set_source_rgb(cr, 0.93, 0.97, 0.93);
-    }
+    set_gray(cr, filled ? 0.04 : 0.99);
     cairo_fill_preserve(cr);
-    cairo_set_source_rgb(cr, 0.03, 0.22, 0.08);
+    set_gray(cr, 0.04);
     cairo_set_line_width(cr, size * 0.055);
     cairo_stroke(cr);
 
-    if (filled) {
-        cairo_set_source_rgb(cr, 0.90, 0.98, 0.90);
-    } else {
-        cairo_set_source_rgb(cr, 0.03, 0.22, 0.08);
-    }
+    set_gray(cr, filled ? 0.99 : 0.04);
     cairo_arc(cr, -size * 0.12, -size * 0.03, size * 0.065, 0, 2.0 * M_PI);
     cairo_fill(cr);
     cairo_arc(cr, size * 0.12, -size * 0.03, size * 0.065, 0, 2.0 * M_PI);
@@ -246,7 +229,7 @@ static void draw_skull(cairo_t *cr, double center_x, double center_y,
 }
 
 static void draw_crown(cairo_t *cr, double center_x, double center_y,
-                       double size, gboolean filled, double angle) {
+                       double size, gboolean filled, double angle, int player) {
     cairo_save(cr);
     cairo_translate(cr, center_x, center_y);
     cairo_rotate(cr, angle);
@@ -259,12 +242,12 @@ static void draw_crown(cairo_t *cr, double center_x, double center_y,
     cairo_line_to(cr, size * 0.5, size * 0.35);
     cairo_close_path(cr);
     if (filled) {
-        cairo_set_source_rgb(cr, 0.95, 0.72, 0.08);
+        set_player_color(cr, player, 0.0);
     } else {
-        cairo_set_source_rgb(cr, 0.98, 0.94, 0.82);
+        set_gray(cr, 0.99);
     }
     cairo_fill_preserve(cr);
-    cairo_set_source_rgb(cr, 0.45, 0.28, 0.02);
+    set_gray(cr, 0.03);
     cairo_set_line_width(cr, 4.0);
     cairo_stroke(cr);
     cairo_restore(cr);
@@ -282,14 +265,17 @@ static void draw_commander_cell(cairo_t *cr, const App *app,
     snprintf(value, sizeof(value), "%02d",
              app->game.commander_damage[player][source]);
 
-    set_player_color(cr, source, 0.22);
+    set_gray(cr, 0.99);
     cairo_rectangle(cr, cell.x, cell.y, cell.width, cell.height);
     cairo_fill(cr);
-    set_player_color(cr, source, 0.0);
+    set_player_color(cr, source, 0.22);
+    cairo_rectangle(cr, label_area.x, label_area.y,
+                    label_area.width, label_area.height);
+    cairo_fill(cr);
+    set_gray(cr, 0.04);
     cairo_set_line_width(cr, 3.0);
     cairo_rectangle(cr, cell.x, cell.y, cell.width, cell.height);
     cairo_stroke(cr);
-    set_gray(cr, 0.04);
 
     draw_rotated_text(cr, label, label_area, cell.width * 0.20, angle);
     double value_size = cell.width * 0.48;
@@ -327,7 +313,7 @@ static void draw_poison_marker(cairo_t *cr, const App *app, int player) {
 
 static void draw_first_triangles(cairo_t *cr, const App *app, int player) {
     if (app->game.first_player != player) return;
-    cairo_set_source_rgb(cr, 0.95, 0.72, 0.08);
+    set_gray(cr, 0.03);
     draw_vertical_triangle(cr, app->layout.first_triangle[player][0], TRUE);
     draw_vertical_triangle(cr, app->layout.first_triangle[player][1], FALSE);
 }
@@ -336,8 +322,12 @@ static void draw_player_name(cairo_t *cr, const App *app, int player) {
     GameRect panel = app->layout.panel[player];
     char label[24];
     snprintf(label, sizeof(label), "PLAYER %d", player + 1);
+    GameRect name = app->layout.player_name[player];
+    set_player_color(cr, player, 0.22);
+    cairo_rectangle(cr, name.x, name.y, name.width, name.height);
+    cairo_fill(cr);
     set_gray(cr, 0.04);
-    draw_rotated_text(cr, label, app->layout.player_name[player],
+    draw_rotated_text(cr, label, name,
                       panel.width * 0.058, player_angle(player));
 }
 
@@ -351,7 +341,7 @@ static void draw_game_over(cairo_t *cr, GameRect panel, double angle) {
     cairo_translate(cr, panel.x + panel.width / 2.0,
                     panel.y + panel.height / 2.0);
     cairo_rotate(cr, angle);
-    cairo_set_source_rgb(cr, 1.0, 0.93, 0.93);
+    set_gray(cr, 1.0);
     draw_text(cr, "GAME", -local_width / 2.0, -local_height * 0.34,
               local_width, line_height, text_size, TRUE);
     draw_text(cr, "OVER", -local_width / 2.0, -local_height * 0.08,
@@ -381,12 +371,12 @@ static void draw_player(cairo_t *cr, const App *app, int player) {
     char life[24];
     snprintf(life, sizeof(life), "%d", app->game.life[player]);
 
-    set_player_color(cr, player, 0.48);
+    set_gray(cr, 0.99);
     cairo_rectangle(cr, panel.x, panel.y, panel.width, panel.height);
     cairo_fill(cr);
 
     if (app->game.eliminated[player]) {
-        set_player_shade(cr, player, 0.62);
+        set_gray(cr, 0.0);
         cairo_rectangle(cr, panel.x, panel.y, panel.width, panel.height);
         cairo_fill(cr);
         draw_game_over(cr, panel, angle);
@@ -403,14 +393,8 @@ static void draw_player(cairo_t *cr, const App *app, int player) {
     char preview[8];
     if (game_life_preview_format(&app->life_preview, player,
                                  preview, sizeof(preview))) {
-        if (preview[0] == '-') {
-            cairo_set_source_rgb(cr, 0.70, 0.05, 0.08);
-        } else {
-            cairo_set_source_rgb(cr, 0.02, 0.42, 0.16);
-        }
         draw_rotated_text(cr, preview, app->layout.life_preview[player],
                           panel.width * 0.075, angle);
-        set_gray(cr, 0.05);
     }
     draw_rotated_text(cr, "−", app->layout.life_minus_visual[player],
                       panel.width * 0.085, angle);
@@ -432,10 +416,10 @@ static void draw_player(cairo_t *cr, const App *app, int player) {
     draw_crown(cr, crown_center_x,
                crown.y + crown.height / 2.0,
                crown_size,
-               app->game.monarch_player == player, angle);
+               app->game.monarch_player == player, angle, player);
 
-    set_player_color(cr, player, 0.0);
-    cairo_set_line_width(cr, 6.0);
+    set_gray(cr, 0.04);
+    cairo_set_line_width(cr, 4.0);
     cairo_rectangle(cr, panel.x, panel.y, panel.width, panel.height);
     cairo_stroke(cr);
 }
@@ -447,10 +431,10 @@ static void draw_toolbar(cairo_t *cr, double y, double width, double height) {
     for (int i = 0; i < 3; ++i) {
         double x = width * cuts[i];
         double item_width = width * (cuts[i + 1] - cuts[i]);
-        cairo_set_source_rgb(cr, 0.10, 0.12, 0.16);
+        set_gray(cr, 0.06);
         cairo_rectangle(cr, x, y, item_width, height);
         cairo_fill(cr);
-        cairo_set_source_rgb(cr, 0.98, 0.94, 0.82);
+        set_gray(cr, 1.0);
         draw_text(cr, labels[i], x, y, item_width, height,
                   minimum(height * 0.28, item_width * 0.105), TRUE);
         set_gray(cr, 1.0);
@@ -631,7 +615,7 @@ static gboolean on_expose(GtkWidget *widget, GdkEventExpose *event, gpointer dat
     double height = allocation.height;
     game_layout_init(&app->layout, width, height);
 
-    cairo_set_source_rgb(cr, 0.96, 0.94, 0.90);
+    set_gray(cr, 0.99);
     cairo_paint(cr);
     draw_player(cr, app, 0);
     draw_player(cr, app, 1);

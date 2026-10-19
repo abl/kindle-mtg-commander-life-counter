@@ -126,7 +126,7 @@ static void test_visual_subregions_match_annotated_positions(void) {
         GameRect value = layout.poison_value[player];
         GameRect panel = layout.panel[player];
         const double expected_marker_margin =
-            panel.x + panel.width * (right ? 0.05 : 0.95);
+            panel.x + panel.width * (right ? 0.01 : 0.99);
         assert(near(layout.marker_margin_x[player], expected_marker_margin));
         assert(near(layout.poison[player].width, panel.width * 0.27));
         assert(right ? skull.x < value.x : value.x < skull.x);
@@ -134,9 +134,8 @@ static void test_visual_subregions_match_annotated_positions(void) {
 
         GameRect first_before = layout.first_triangle[player][0];
         GameRect first_after = layout.first_triangle[player][1];
-        const double name_x = panel.x + panel.width * (right ? 0.08 : 0.92);
-        assert(near(center_x(first_before), name_x));
-        assert(near(center_x(first_after), name_x));
+        assert(near(center_x(first_before), center_x(layout.player_name[player])));
+        assert(near(center_x(first_after), center_x(layout.player_name[player])));
         assert(near(center_y(first_before), panel.y + panel.height * 0.34));
         assert(near(center_y(first_after), panel.y + panel.height * 0.66));
 
@@ -181,13 +180,18 @@ static void test_name_and_preview_geometry_is_player_local(void) {
         assert(preview.x + preview.width <= panel.x + panel.width);
         assert(preview.y + preview.height <= panel.y + panel.height);
 
-        double name_x = center_x(name);
+        const bool right = player == 1 || player == 2;
         double life_x = center_x(content);
         double preview_x = center_x(preview);
-        if (name_x < life_x) {
-            assert(name_x < preview_x && preview_x < life_x);
+        double life_edge = right ? name.x + name.width : name.x;
+        double away_edge = right ? name.x : name.x + name.width;
+        assert(fabs(life_edge - life_x) < fabs(away_edge - life_x));
+        if (right) {
+            assert(name.x + name.width <= preview.x);
+            assert(away_edge < preview_x && preview_x < life_x);
         } else {
-            assert(life_x < preview_x && preview_x < name_x);
+            assert(preview.x + preview.width <= name.x);
+            assert(life_x < preview_x && preview_x < away_edge);
         }
         assert(near(center_y(name), center_y(panel)));
         assert(near(center_y(preview), center_y(panel)));
